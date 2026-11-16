@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "retrieved_on": "2026-11-16",
+  "upstream_revisions": {
+    "chromium/chromium": "b557748356c6c5765dcc8b5bc465e9591c15d115",
+    "webmproject/hdr-explorer": "ee73fd7a620c48e431ebfca4de20010bc4dc7f98"
+  },
+  "generation_ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+  "downloads": [
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/bear-1280x720.mp4",
+      "path": "decode/h264_8bit.mp4",
+      "sha256": "bcb75d3db0a1a5056f4cd5c770ceccdb4cae920f21abb8139b29cd9ad39e3857",
+      "bytes": 715963
+    },
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/bear-320x180-hi10p.mp4",
+      "path": "decode/h264_10bit.mp4",
+      "sha256": "04ff92825f6c903e0bc1c662e38f45f9cc50177b7bc82c0e1aacca4ec5dd5610",
+      "bytes": 157833
+    },
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/bear-1280x720-hevc-no-audio.mp4",
+      "path": "decode/hevc_8bit.mp4",
+      "sha256": "6a4b08b56b11ba8d4d04f08120860cbd26b7046ce80bd32e8d152220c0211788",
+      "bytes": 309787
+    },
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/bear-1280x720-hevc-10bit-no-audio.mp4",
+      "path": "decode/hevc_10bit.mp4",
+      "sha256": "eb847d0b88b0cb804ac7ce53bf3843c70538335a1521187e00f3fa92b7e98657",
+      "bytes": 309904
+    },
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/bear-av1.mp4",
+      "path": "decode/av1_8bit.mp4",
+      "sha256": "2081972026e679775013102a63280331d8fae236dc8efef4ce4878a822cf4501",
+      "bytes": 24355
+    },
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/bear-av1-320x180-10bit.mp4",
+      "path": "decode/av1_10bit.mp4",
+      "sha256": "b34ad35f5ea9697c7afed36bb98a29649158ea808aab384e99920c43bcd2be61",
+      "bytes": 19658
+    },
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/glass-blowing2-dolby-vision-profile-5-frag.mp4",
+      "path": "hdr/dolby_vision_p5.mp4",
+      "sha256": "d21fc3938a813b6ce25efe890074b23d966a5828c9a3d33de7e8591a25dd2036",
+      "bytes": 4537752
+    },
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/glass-blowing2-dolby-vision-profile-8-1-frag.mp4",
+      "path": "hdr/dolby_vision_p81.mp4",
+      "sha256": "2cbedc36cf1ec2fdaaa54d26942ff93faeda4d4b2baf9fd25ee74bfebc15287e",
+      "bytes": 3528195
+    },
+    {
+      "url": "https://raw.githubusercontent.com/chromium/chromium/b557748356c6c5765dcc8b5bc465e9591c15d115/media/test/data/README.md",
+      "path": "sources/chromium-README.md",
+      "sha256": "132c9c6d9253169b2ad98e5d1f6a8b6f8273124316e3189a10baf32025934d7b",
+      "bytes": 93401
+    },
+    {
+      "url": "https://raw.githubusercontent.com/webmproject/hdr-explorer/ee73fd7a620c48e431ebfca4de20010bc4dc7f98/data/fountain_hlg.mp4",
+      "path": "hdr/hlg_av1_10bit.mp4",
+      "sha256": "9187375e88aaa300df83fa2222cf2c819751a644d472a95ed59c55df81be1d38",
+      "bytes": 1491248
+    },
+    {
+      "url": "https://raw.githubusercontent.com/webmproject/hdr-explorer/ee73fd7a620c48e431ebfca4de20010bc4dc7f98/LICENSE",
+      "path": "sources/hdr-explorer-LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358
+    },
+    {
+      "url": "https://raw.githubusercontent.com/webmproject/hdr-explorer/ee73fd7a620c48e431ebfca4de20010bc4dc7f98/README.md",
+      "path": "sources/hdr-explorer-README.md",
+      "sha256": "a0739b66250b4041876276fc1e1e687938fac6b89ecedecdc43eb1e29f761315",
+      "bytes": 1364
+    }
+  ],
+  "recipes": [
+    {
+      "path": "hdr/hdr10_hevc_10bit.mp4",
+      "inputs": [
+        "hdr/dolby_vision_p81.mp4"
+      ],
+      "args": [
+        "-i",
+        "hdr/dolby_vision_p81.mp4",
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-bsf:v",
+        "dovi_rpu=strip=1",
+        "-tag:v",
+        "hvc1",
+        "-movflags",
+        "+faststart"
+      ],
+      "sha256": "6e00ab81dace883b8c0608427f7ba62b46dedfd43f7c3f69025951c61e37019c",
+      "bytes": 3508324
+    },
+    {
+      "path": "deinterlace/interlaced_tff_h264.mp4",
+      "inputs": [
+        "decode/h264_8bit.mp4"
+      ],
+      "args": [
+        "-stream_loop",
+        "7",
+        "-i",
+        "decode/h264_8bit.mp4",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        "setpts=(PTS-STARTPTS)/2,fps=60000/1001,scale=720:480,setsar=1,tinterlace=mode=interleave_top",
+        "-frames:v",
+        "180",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-flags",
+        "+ilme+ildct",
+        "-x264-params",
+        "tff=1",
+        "-movflags",
+        "+faststart"
+      ],
+      "sha256": "2e9f35ea66b4c66ceed23dfde93894750d84b6ceaac0dc6114ff4dc8232bf696",
+      "bytes": 2515781
+    },
+    {
+      "path": "deinterlace/telecine_32_tff_h264.mp4",
+      "inputs": [
+        "decode/h264_8bit.mp4"
+      ],
+      "args": [
+        "-stream_loop",
+        "3",
+        "-i",
+        "decode/h264_8bit.mp4",
+        "-map",
+        "0:v:0",
+        "-an",
+        "-vf",
+        "scale=720:480,setsar=1,fps=24000/1001,telecine=first_field=top:pattern=23",
+        "-frames:v",
+        "180",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-flags",
+        "+ilme+ildct",
+        "-x264-params",
+        "tff=1",
+        "-movflags",
+        "+faststart"
+      ],
+      "sha256": "45faa4bab40e813d18a2783b708dc4156e3a188e617c585cd1113402753df795",
+      "bytes": 1763733
+    },
+    {
+      "path": "timing/vfr_h264_aac.mp4",
+      "inputs": [
+        "decode/h264_8bit.mp4"
+      ],
+      "args": [
+        "-stream_loop",
+        "7",
+        "-i",
+        "decode/h264_8bit.mp4",
+        "-filter_complex",
+        "[0:v]scale=640:360,setsar=1,fps=30,trim=duration=12,settb=1/30000,select='if(lt(n,120),not(mod(n,3)),if(lt(n,240),not(mod(n,2)),1))',setpts=PTS+6000[v];[0:a]atrim=duration=12,asetpts=PTS-STARTPTS[a]",
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-bf",
+        "3",
+        "-fps_mode:v",
+        "vfr",
+        "-enc_time_base:v",
+        "1:30000",
+        "-video_track_timescale",
+        "30000",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart"
+      ],
+      "sha256": "17b677df2aafaa5281ad6b9330ba89cc5649f2fbbde500b309ef7fe0ef004642",
+      "bytes": 1678966
+    }
+  ],
+  "samples": [
+    {
+      "path": "decode/h264_8bit.mp4",
+      "codec_name": "h264",
+      "pix_fmt": "yuv420p"
+    },
+    {
+      "path": "decode/h264_10bit.mp4",
+      "codec_name": "h264",
+      "pix_fmt": "yuv420p10le"
+    },
+    {
+      "path": "decode/hevc_8bit.mp4",
+      "codec_name": "hevc",
+      "pix_fmt": "yuv420p"
+    },
+    {
+      "path": "decode/hevc_10bit.mp4",
+      "codec_name": "hevc",
+      "pix_fmt": "yuv420p10le"
+    },
+    {
+      "path": "decode/av1_8bit.mp4",
+      "codec_name": "av1",
+      "pix_fmt": "yuv420p"
+    },
+    {
+      "path": "decode/av1_10bit.mp4",
+      "codec_name": "av1",
+      "pix_fmt": "yuv420p10le"
+    },
+    {
+      "path": "hdr/hlg_av1_10bit.mp4",
+      "codec_name": "av1",
+      "pix_fmt": "yuv420p10le"
+    },
+    {
+      "path": "hdr/dolby_vision_p5.mp4",
+      "codec_name": "hevc",
+      "pix_fmt": "yuv420p10le"
+    },
+    {
+      "path": "hdr/dolby_vision_p81.mp4",
+      "codec_name": "hevc",
+      "pix_fmt": "yuv420p10le"
+    },
+    {
+      "path": "hdr/hdr10_hevc_10bit.mp4",
+      "codec_name": "hevc",
+      "pix_fmt": "yuv420p10le"
+    },
+    {
+      "path": "deinterlace/interlaced_tff_h264.mp4",
+      "codec_name": "h264",
+      "pix_fmt": "yuv420p"
+    },
+    {
+      "path": "deinterlace/telecine_32_tff_h264.mp4",
+      "codec_name": "h264",
+      "pix_fmt": "yuv420p"
+    },
+    {
+      "path": "timing/vfr_h264_aac.mp4",
+      "codec_name": "h264",
+      "pix_fmt": "yuv420p"
+    }
+  ]
+}

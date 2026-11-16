@@ -38,7 +38,7 @@ source build/tools/bin/activate
 ./scripts/bootstrap.sh
 ```
 
-后续终端使用该环境前执行 `source build/tools/bin/activate`。Python 仅用于安装开发工具，`vtenc` 本身没有 Python 运行时依赖；`build/` 整体不纳入 Git。
+后续终端使用该环境前执行 `source build/tools/bin/activate`。Python 用于安装开发工具及准备测试素材，`vtenc` 本身没有 Python 运行时依赖；`build/` 整体不纳入 Git。
 
 2026-11-16 已在 Apple M6、macOS 27.2.1、Apple Clang 21 / macOS SDK 27.2 上验证 Debug / Release 构建、本地安装和 CLI 检查；H.264 8-bit、HEVC 8-bit / 10-bit 的 1920×1080 硬件会话均成功准备并确认硬件后端。这不是码流质量验证，也不代表其他机型或旧系统已完成验证。
 
@@ -67,6 +67,8 @@ cmake --install build/release --prefix "$PWD/build/install"
 退出码：`0` 成功、`1` 运行时或硬件错误、`2` 参数错误。结果写入 stdout，诊断写入 stderr。当前只提供文本输出，JSON 协议留待后续实现。
 
 ## 代码布局
+
+视频测试素材见 [tests/video_samples/README.md](tests/video_samples/README.md)：包含 H.264 / HEVC / AV1 的 8/10-bit 输入、HLG / HDR10 / Dolby Vision、普通交错 / Telecine，以及带音轨的 VFR。下载、生成和校验按需运行，不加入默认 CTest。
 
 ```text
 include/vtenc/        纯 C++ 公共接口

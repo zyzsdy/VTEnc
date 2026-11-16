@@ -1,0 +1,8 @@
+# Downloaded third-party media and upstream documents stay local.
+/decode/
+/hdr/
+/deinterlace/
+/timing/
+/sources/
+/reports/
+__pycache__/

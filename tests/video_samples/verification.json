@@ -1,0 +1,541 @@
+{
+  "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+  "hardware_decode_tested": false,
+  "hdr10_base_layer_pixels_unchanged": true,
+  "samples": [
+    {
+      "path": "decode/h264_8bit.mp4",
+      "bytes": 715963,
+      "sha256": "bcb75d3db0a1a5056f4cd5c770ceccdb4cae920f21abb8139b29cd9ad39e3857",
+      "decoded_video_frames": 82,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "audio",
+          "codec_name": "aac",
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/44100",
+          "start_pts": 1024,
+          "start_time": "0.023220",
+          "duration_ts": 121856,
+          "duration": "2.763175",
+          "nb_frames": "119",
+          "sample_rate": "44100",
+          "channels": 2
+        },
+        {
+          "index": 1,
+          "codec_type": "video",
+          "codec_name": "h264",
+          "profile": "High",
+          "width": 1280,
+          "height": 720,
+          "pix_fmt": "yuv420p",
+          "field_order": "progressive",
+          "r_frame_rate": "30000/1001",
+          "avg_frame_rate": "30000/1001",
+          "time_base": "1/30000",
+          "start_pts": 1001,
+          "start_time": "0.033367",
+          "duration_ts": 82082,
+          "duration": "2.736067",
+          "nb_frames": "82"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1001": 81
+      }
+    },
+    {
+      "path": "decode/h264_10bit.mp4",
+      "bytes": 157833,
+      "sha256": "04ff92825f6c903e0bc1c662e38f45f9cc50177b7bc82c0e1aacca4ec5dd5610",
+      "decoded_video_frames": 82,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "h264",
+          "profile": "High 10",
+          "width": 320,
+          "height": 180,
+          "pix_fmt": "yuv420p10le",
+          "field_order": "progressive",
+          "r_frame_rate": "30000/1001",
+          "avg_frame_rate": "30000/1001",
+          "time_base": "1/30000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 82082,
+          "duration": "2.736067",
+          "nb_frames": "82"
+        },
+        {
+          "index": 1,
+          "codec_type": "audio",
+          "codec_name": "aac",
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/44100",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 120834,
+          "duration": "2.740000",
+          "nb_frames": "119",
+          "sample_rate": "44100",
+          "channels": 2
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1001": 81
+      }
+    },
+    {
+      "path": "decode/hevc_8bit.mp4",
+      "bytes": 309787,
+      "sha256": "6a4b08b56b11ba8d4d04f08120860cbd26b7046ce80bd32e8d152220c0211788",
+      "decoded_video_frames": 82,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "hevc",
+          "profile": "Main",
+          "width": 1280,
+          "height": 720,
+          "pix_fmt": "yuv420p",
+          "field_order": "progressive",
+          "r_frame_rate": "30000/1001",
+          "avg_frame_rate": "30000/1001",
+          "time_base": "1/30000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 82082,
+          "duration": "2.736067",
+          "nb_frames": "82",
+          "color_range": "tv"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1001": 81
+      }
+    },
+    {
+      "path": "decode/hevc_10bit.mp4",
+      "bytes": 309904,
+      "sha256": "eb847d0b88b0cb804ac7ce53bf3843c70538335a1521187e00f3fa92b7e98657",
+      "decoded_video_frames": 82,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "hevc",
+          "profile": "Main 10",
+          "width": 1280,
+          "height": 720,
+          "pix_fmt": "yuv420p10le",
+          "field_order": "progressive",
+          "r_frame_rate": "30000/1001",
+          "avg_frame_rate": "30000/1001",
+          "time_base": "1/30000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 82082,
+          "duration": "2.736067",
+          "nb_frames": "82",
+          "color_range": "tv"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1001": 81
+      }
+    },
+    {
+      "path": "decode/av1_8bit.mp4",
+      "bytes": 24355,
+      "sha256": "2081972026e679775013102a63280331d8fae236dc8efef4ce4878a822cf4501",
+      "decoded_video_frames": 82,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "av1",
+          "profile": "Main",
+          "width": 320,
+          "height": 240,
+          "pix_fmt": "yuv420p",
+          "field_order": "progressive",
+          "r_frame_rate": "30000/1001",
+          "avg_frame_rate": "30000/1001",
+          "time_base": "1/30000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 82082,
+          "duration": "2.736067",
+          "color_range": "tv"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1001": 81
+      }
+    },
+    {
+      "path": "decode/av1_10bit.mp4",
+      "bytes": 19658,
+      "sha256": "b34ad35f5ea9697c7afed36bb98a29649158ea808aab384e99920c43bcd2be61",
+      "decoded_video_frames": 82,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "av1",
+          "profile": "Main",
+          "width": 320,
+          "height": 180,
+          "pix_fmt": "yuv420p10le",
+          "r_frame_rate": "30000/1001",
+          "avg_frame_rate": "16400/547",
+          "time_base": "1/16000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 43760,
+          "duration": "2.735000",
+          "color_range": "tv"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "528": 52,
+        "544": 29
+      }
+    },
+    {
+      "path": "hdr/hlg_av1_10bit.mp4",
+      "bytes": 1491248,
+      "sha256": "9187375e88aaa300df83fa2222cf2c819751a644d472a95ed59c55df81be1d38",
+      "decoded_video_frames": 96,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "av1",
+          "profile": "Main",
+          "width": 1280,
+          "height": 720,
+          "pix_fmt": "yuv420p10le",
+          "r_frame_rate": "30/1",
+          "avg_frame_rate": "30/1",
+          "time_base": "1/15360",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 49152,
+          "duration": "3.200000",
+          "nb_frames": "96",
+          "color_range": "tv",
+          "color_space": "bt2020nc",
+          "color_transfer": "arib-std-b67",
+          "color_primaries": "bt2020"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "512": 95
+      },
+      "frame_side_data_types": []
+    },
+    {
+      "path": "hdr/dolby_vision_p5.mp4",
+      "bytes": 4537752,
+      "sha256": "d21fc3938a813b6ce25efe890074b23d966a5828c9a3d33de7e8591a25dd2036",
+      "decoded_video_frames": 120,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "hevc",
+          "profile": "Main 10",
+          "width": 1920,
+          "height": 1080,
+          "pix_fmt": "yuv420p10le",
+          "r_frame_rate": "60/1",
+          "avg_frame_rate": "60/1",
+          "time_base": "1/60000",
+          "start_pts": 3000,
+          "start_time": "0.050000",
+          "duration_ts": 120000,
+          "duration": "2.000000",
+          "color_range": "pc",
+          "side_data_list": [
+            {
+              "side_data_type": "DOVI configuration record",
+              "dv_version_major": 1,
+              "dv_version_minor": 0,
+              "dv_profile": 5,
+              "dv_level": 5,
+              "rpu_present_flag": 1,
+              "el_present_flag": 0,
+              "bl_present_flag": 1,
+              "dv_bl_signal_compatibility_id": 0,
+              "dv_md_compression": "none"
+            }
+          ]
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1000": 119
+      },
+      "frame_side_data_types": [
+        "Dolby Vision Metadata",
+        "Dolby Vision RPU Data"
+      ],
+      "frames_with_dolby_vision_rpu": 120
+    },
+    {
+      "path": "hdr/dolby_vision_p81.mp4",
+      "bytes": 3528195,
+      "sha256": "2cbedc36cf1ec2fdaaa54d26942ff93faeda4d4b2baf9fd25ee74bfebc15287e",
+      "decoded_video_frames": 120,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "hevc",
+          "profile": "Main 10",
+          "width": 1920,
+          "height": 1080,
+          "pix_fmt": "yuv420p10le",
+          "r_frame_rate": "60/1",
+          "avg_frame_rate": "60/1",
+          "time_base": "1/60000",
+          "start_pts": 3000,
+          "start_time": "0.050000",
+          "duration_ts": 120000,
+          "duration": "2.000000",
+          "color_range": "tv",
+          "color_space": "bt2020nc",
+          "color_transfer": "smpte2084",
+          "color_primaries": "bt2020",
+          "side_data_list": [
+            {
+              "side_data_type": "DOVI configuration record",
+              "dv_version_major": 1,
+              "dv_version_minor": 0,
+              "dv_profile": 8,
+              "dv_level": 5,
+              "rpu_present_flag": 1,
+              "el_present_flag": 0,
+              "bl_present_flag": 1,
+              "dv_bl_signal_compatibility_id": 1,
+              "dv_md_compression": "none"
+            }
+          ]
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1000": 119
+      },
+      "frame_side_data_types": [
+        "Content light level metadata",
+        "Dolby Vision Metadata",
+        "Dolby Vision RPU Data",
+        "Mastering display metadata"
+      ],
+      "frames_with_dolby_vision_rpu": 120
+    },
+    {
+      "path": "hdr/hdr10_hevc_10bit.mp4",
+      "bytes": 3508324,
+      "sha256": "6e00ab81dace883b8c0608427f7ba62b46dedfd43f7c3f69025951c61e37019c",
+      "decoded_video_frames": 120,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "hevc",
+          "profile": "Main 10",
+          "width": 1920,
+          "height": 1080,
+          "pix_fmt": "yuv420p10le",
+          "r_frame_rate": "60/1",
+          "avg_frame_rate": "60/1",
+          "time_base": "1/60000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 120000,
+          "duration": "2.000000",
+          "nb_frames": "120",
+          "color_range": "tv",
+          "color_space": "bt2020nc",
+          "color_transfer": "smpte2084",
+          "color_primaries": "bt2020"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1000": 119
+      },
+      "frame_side_data_types": [
+        "Content light level metadata",
+        "Mastering display metadata"
+      ],
+      "hdr10_static_metadata": [
+        {
+          "side_data_type": "Mastering display metadata",
+          "red_x": "35400/50000",
+          "red_y": "14600/50000",
+          "green_x": "8500/50000",
+          "green_y": "39850/50000",
+          "blue_x": "6550/50000",
+          "blue_y": "2300/50000",
+          "white_point_x": "15635/50000",
+          "white_point_y": "16450/50000",
+          "min_luminance": "50/10000",
+          "max_luminance": "40000000/10000"
+        },
+        {
+          "side_data_type": "Content light level metadata",
+          "max_content": 0,
+          "max_average": 0
+        }
+      ]
+    },
+    {
+      "path": "deinterlace/interlaced_tff_h264.mp4",
+      "bytes": 2515781,
+      "sha256": "2e9f35ea66b4c66ceed23dfde93894750d84b6ceaac0dc6114ff4dc8232bf696",
+      "decoded_video_frames": 180,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "h264",
+          "profile": "High",
+          "width": 720,
+          "height": 480,
+          "pix_fmt": "yuv420p",
+          "field_order": "tt",
+          "r_frame_rate": "30000/1001",
+          "avg_frame_rate": "30000/1001",
+          "time_base": "1/30000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 180180,
+          "duration": "6.006000",
+          "nb_frames": "180"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1001": 179
+      },
+      "idet": [
+        "Repeated Fields: Neither:   180 Top:     0 Bottom:     0",
+        "Single frame detection: TFF:   180 BFF:     0 Progressive:     0 Undetermined:     0",
+        "Multi frame detection: TFF:   180 BFF:     0 Progressive:     0 Undetermined:     0"
+      ]
+    },
+    {
+      "path": "deinterlace/telecine_32_tff_h264.mp4",
+      "bytes": 1763733,
+      "sha256": "45faa4bab40e813d18a2783b708dc4156e3a188e617c585cd1113402753df795",
+      "decoded_video_frames": 180,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "h264",
+          "profile": "High",
+          "width": 720,
+          "height": 480,
+          "pix_fmt": "yuv420p",
+          "field_order": "tt",
+          "r_frame_rate": "30000/1001",
+          "avg_frame_rate": "30000/1001",
+          "time_base": "1/30000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 180180,
+          "duration": "6.006000",
+          "nb_frames": "180"
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1001": 179
+      },
+      "idet": [
+        "Repeated Fields: Neither:   105 Top:    38 Bottom:    37",
+        "Single frame detection: TFF:   144 BFF:     0 Progressive:    36 Undetermined:     0",
+        "Multi frame detection: TFF:   176 BFF:     0 Progressive:     4 Undetermined:     0"
+      ],
+      "inverse_telecine_frames": 144
+    },
+    {
+      "path": "timing/vfr_h264_aac.mp4",
+      "bytes": 1678966,
+      "sha256": "17b677df2aafaa5281ad6b9330ba89cc5649f2fbbde500b309ef7fe0ef004642",
+      "decoded_video_frames": 220,
+      "software_decode": "passed",
+      "streams": [
+        {
+          "index": 0,
+          "codec_type": "video",
+          "codec_name": "h264",
+          "profile": "High",
+          "width": 640,
+          "height": 360,
+          "pix_fmt": "yuv420p",
+          "field_order": "progressive",
+          "r_frame_rate": "30/1",
+          "avg_frame_rate": "1650/91",
+          "time_base": "1/30000",
+          "start_pts": 6000,
+          "start_time": "0.200000",
+          "duration_ts": 364000,
+          "duration": "12.133333",
+          "nb_frames": "220"
+        },
+        {
+          "index": 1,
+          "codec_type": "audio",
+          "codec_name": "aac",
+          "profile": "LC",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/44100",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 529200,
+          "duration": "12.000000",
+          "nb_frames": "518",
+          "sample_rate": "44100",
+          "channels": 2
+        }
+      ],
+      "video_pts_delta_ticks": {
+        "1000": 119,
+        "2000": 60,
+        "3000": 40
+      },
+      "timing_checks": {
+        "expected_pts_match": true,
+        "video_frames": 220,
+        "video_start_seconds": "1/5",
+        "audio_start_seconds": "0",
+        "audio_duration_seconds": "12",
+        "b_frame_reordering": true,
+        "packet_dts_strictly_increasing": true
+      }
+    }
+  ]
+}
