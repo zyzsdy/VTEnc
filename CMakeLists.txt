@@ -35,6 +35,8 @@ target_include_directories(vtenc_core PUBLIC include)
 target_link_libraries(vtenc_core PRIVATE vtenc_options)
 
 add_library(vtenc_apple STATIC
+    src/apple/encoder.cpp
+    src/apple/bitstream_output.cpp
     src/apple/capability_probe.cpp
     src/apple/metal_device.mm)
 target_include_directories(vtenc_apple PUBLIC include)
@@ -55,4 +57,9 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" -DVTENC=$<TARGET_FILE:vtenc>
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake")
     set_tests_properties(vtenc.cli PROPERTIES LABELS "cli" TIMEOUT 15)
+    add_executable(vtenc_bitstream_test tests/bitstream_test.cpp)
+    target_include_directories(vtenc_bitstream_test PRIVATE src/apple)
+    target_link_libraries(vtenc_bitstream_test PRIVATE vtenc_apple vtenc_core vtenc_options)
+    add_test(NAME vtenc.bitstream COMMAND vtenc_bitstream_test "${CMAKE_CURRENT_BINARY_DIR}/test-output")
+    set_tests_properties(vtenc.bitstream PROPERTIES LABELS "bitstream" TIMEOUT 15)
 endif()

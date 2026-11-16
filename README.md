@@ -6,13 +6,16 @@
 
 ## 当前状态
 
-开发框架阶段，**尚不能对视频文件进行转码**。现有功能：
+已实现 P1 硬编最小闭环，**尚不能对 MP4/MOV 等视频文件进行转码**。现有功能：
 
 - CMake / Ninja 的 Debug、Release 构建与安装目标。
 - 纯 C++ CLI、参数校验，以及独立的 Apple 框架适配库。
 - H.264 8-bit、HEVC 8/10-bit 的硬件会话探测与支持属性枚举。
 - Objective-C++ / ARC 的 Metal 设备查询。
-- 不依赖硬件编码器的 CLI 冒烟检查。
+- 合成测试帧 / 原始 NV12、P010 输入，H.264 High 8-bit、HEVC Main 8-bit / Main10 硬件编码。
+- 平均码率目标或原生 Quality、GOP 上限、整数有理数帧率；Annex B 输出及逐帧时间戳 CSV。
+- 有界异步回调、批次背压和排空；SIGINT 取消、失败清理、输出防覆盖。
+- 不依赖硬件编码器的 CLI / 码流适配检查，以及显式硬件集成验证脚本。
 
 完整开发方案见 [docs/开发方案.md](docs/开发方案.md)。
 
@@ -64,7 +67,37 @@ cmake --install build/release --prefix "$PWD/build/install"
 
 能力探测固定使用 1920×1080 的 NV12 / P010 输入约束，设置对应 Profile，准备会话并核验 `UsingHardwareAcceleratedVideoEncoder`。它不提交帧，不验证真实码流，不代表最大分辨率、吞吐量或属性值组合均可用。硬件忙、配置不受支持等错误直接报告 OSStatus 并以非零状态退出，不降级到软件编码。
 
-退出码：`0` 成功、`1` 运行时或硬件错误、`2` 参数错误。结果写入 stdout，诊断写入 stderr。当前只提供文本输出，JSON 协议留待后续实现。
+退出码：`0` 成功、`1` 运行时或硬件错误、`2` 参数错误、`130` 用户取消。结果写入 stdout，诊断写入 stderr。当前只提供文本输出，JSON 协议留待后续实现。
+
+## P1 硬件编码
+
+```bash
+# 合成 65 帧 1080p、30000/1001 fps 的 H.264 码流
+./build/dev/vtenc --synthetic --input-res 1920x1080 --frames 65 \
+  --fps 30000/1001 --codec h264 --bitrate 5000 --gop-len 60 -o build/demo.h264
+
+# 原始 P010：HEVC Main10，Quality 是 VideoToolbox 原生 0..1 质量目标
+./build/dev/vtenc -i input.p010 --input-res 1920x1080 --frames 120 \
+  --fps 24000/1001 --codec hevc --output-depth 10 --quality 0.7 -o build/demo.hevc
+
+# 无硬件码流适配检查
+ctest --preset dev -R '^vtenc.bitstream$'
+
+# 显式硬件集成验证：需要真实 Apple Silicon、ffprobe、ffmpeg、Python 3
+python3 tests/encode_hardware.py --vtenc build/dev/vtenc
+```
+
+输入尺寸和帧数必须显式提供。`-i` 只接受普通原始文件：8-bit 是紧密排列的 NV12（Y 后接交错 UV），10-bit 是小端 P010（每个 16-bit 字的高 10 位有效，低 6 位为零）；文件中没有行填充。`--output-depth` 同时决定原始输入格式，不做位深转换。只读 `--frames` 指定的帧数，尾部数据不消费，输入不足则报错。合成输入为移动灰阶渐变。
+
+本阶段限定逐行、video range、BT.709 SDR；调用方负责提供符合约定的原始数据。10-bit 不等于 HDR；本阶段不读取或转换输入色彩元数据。帧率是整数或整数分数，PTS 从 0 开始，以 `帧号 × fps_den / fps_num` 构造，不做浮点累积。默认禁用帧重排，未实现 B 帧、VFR、滤镜、音频或容器封装。
+
+默认平均码率目标为 5000 kbit/s。`--bitrate` 绑定 `AverageBitRate`，是软目标，不保证输出大小；`--quality` 绑定原生 `Quality`，不等价于 CRF/CQP，两者不能同时指定。`--gop-len` 是最大关键帧间隔，编码器可以提前插入关键帧。所有属性设置检查 OSStatus，不支持就失败，不做软件回退。
+
+输出为 Annex B 裸码流，不因文件扩展名变成 MP4/MOV。同步帧前写入 SPS/PPS（HEVC 还包括 VPS），将长度前缀 NAL 转为起始码。裸码流不携带容器级 PTS/DTS，播放器或 FFprobe 猜测的帧率可能不正确；封装时需指定本次输入帧率。`<输出路径>.timestamps.csv` 保存编码回调原始整数 PTS/DTS/duration、同步帧标记及该帧的字节范围；VideoToolbox 未指定的 DTS 保持为空，范围包括该帧前的参数集。
+
+同目录临时文件在全部排空、帧数与时间戳校验、硬件后端复核后发布；已有输出或时间戳文件均不覆盖。每批最多 8 帧，回调只保留样本或记录错误，调度线程负责码流写出。SIGINT 停止新提交、排空已提交帧、删除临时输出并返回 130。运行错误返回 1 并清理临时输出；进程被强制杀死或系统崩溃时可能残留 `.part.*` 文件。两个文件分别原子发布，不承诺跨文件的崩溃事务。
+
+2026-11-16 在 Apple M6 / macOS 27.2.1 上完成三种格式的真实硬编及独立码流验证，覆盖合成输入、非对齐宽度原始输入、尾批排空及异常路径。详见 [P1 验证记录](docs/P1验证.md)。该结果不代表其他硬件、旧 macOS、任意分辨率或 HDR 已验证。
 
 ## 代码布局
 

@@ -1,11 +1,28 @@
 #include "vtenc/capabilities.hpp"
 #include "vtenc/command_line.hpp"
+#include "vtenc/encoder.hpp"
 
 #include <exception>
+#include <csignal>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
+
+namespace {
+volatile std::sig_atomic_t interrupted = 0;
+extern "C" void handle_interrupt(int) { interrupted = 1; }
+class InterruptHandler {
+public:
+    InterruptHandler() : previous_(std::signal(SIGINT, handle_interrupt)) {
+        if (previous_ == SIG_ERR) throw std::runtime_error("Cannot install SIGINT handler");
+    }
+    ~InterruptHandler() { std::signal(SIGINT, previous_); }
+private:
+    using Handler = void (*)(int);
+    Handler previous_;
+};
+}
 
 int main(int argc, char* argv[]) {
     try {
@@ -23,7 +40,7 @@ int main(int argc, char* argv[]) {
             std::cout << vtenc::help_text();
             break;
         case vtenc::Command::version:
-            std::cout << "VTEnc " << VTENC_VERSION << " (macOS arm64; VideoToolbox; scaffold)\n";
+            std::cout << "VTEnc " << VTENC_VERSION << " (macOS arm64; VideoToolbox hardware encoder)\n";
             break;
         case vtenc::Command::check_device:
             std::cout << vtenc::metal_device_name() << '\n';
@@ -36,6 +53,19 @@ int main(int argc, char* argv[]) {
                       << "Hardware verified: " << (capabilities.hardware ? "yes" : "no") << '\n'
                       << "Session prepared; no frames encoded. Advertised properties (values not validated):\n";
             for (const auto& name : capabilities.property_names) std::cout << "  " << name << '\n';
+            break;
+        }
+        case vtenc::Command::encode: {
+            InterruptHandler handler;
+            const auto result = vtenc::encode_video(options.encode, interrupted);
+            if (result.cancelled) {
+                std::cerr << "vtenc: cancelled; drained " << result.frames << " frames; incomplete output discarded\n";
+                return 130;
+            }
+            std::cout << "Hardware verified: yes\nEncoded " << result.frames << " frames, " << result.bytes
+                      << " bytes (" << vtenc::codec_name(options.encode.video.codec) << ' '
+                      << options.encode.video.bit_depth << "-bit)\nOutput: " << options.encode.output
+                      << "\nTimestamps: " << options.encode.output << ".timestamps.csv\n";
             break;
         }
         }
