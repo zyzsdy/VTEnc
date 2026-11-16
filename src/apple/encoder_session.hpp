@@ -31,7 +31,7 @@ public:
 };
 
 inline void create_hardware_session(CompressionSession& session, const ProbeConfig& config,
-    VTCompressionOutputCallback callback, void* context) {
+    VTCompressionOutputCallback callback, void* context, OSType source_pixel_format = 0) {
     if ((config.codec != Codec::h264 && config.codec != Codec::hevc) ||
         (config.bit_depth != 8 && config.bit_depth != 10) ||
         (config.codec == Codec::h264 && config.bit_depth != 8) ||
@@ -42,7 +42,7 @@ inline void create_hardware_session(CompressionSession& session, const ProbeConf
     const void* spec_values[] = {kCFBooleanTrue};
     CFRef specification(CFDictionaryCreate(kCFAllocatorDefault, spec_keys, spec_values, 1,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
-    const auto pixel_format = static_cast<std::int32_t>(config.bit_depth == 10
+    const auto pixel_format = static_cast<std::int32_t>(source_pixel_format ? source_pixel_format : config.bit_depth == 10
         ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
     CFRef pixel_number(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pixel_format));
     const void* pixel_keys[] = {kCVPixelBufferPixelFormatTypeKey};
@@ -69,6 +69,47 @@ inline void verify_hardware(VTCompressionSessionRef session) {
     CFRef hardware(raw);
     if (CFGetTypeID(hardware.get()) != CFBooleanGetTypeID() || !CFEqual(hardware.get(), kCFBooleanTrue)) {
         throw std::runtime_error("VideoToolbox did not confirm hardware encoding; software fallback is forbidden");
+    }
+}
+
+inline void configure_hardware_encoder(VTCompressionSessionRef session, const EncodeConfig& config, CMFormatDescriptionRef source_format = nullptr) {
+    const auto set = [&](CFStringRef key, CFTypeRef value, const char* name) {
+        check_status(VTSessionSetProperty(session, key, value), std::string("VTSessionSetProperty(") + name + ")");
+    };
+    const auto set_integer = [&](CFStringRef key, std::int32_t value, const char* name) {
+        CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &value));
+        set(key, number.get(), name);
+    };
+    set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, "AllowFrameReordering");
+    set(kVTCompressionPropertyKey_RealTime, kCFBooleanFalse, "RealTime");
+    set_integer(kVTCompressionPropertyKey_MaxKeyFrameInterval, config.gop, "MaxKeyFrameInterval");
+    if (!source_format) {
+        // Floating point is only an encoder rate hint. All submitted times use CMTime integers.
+        const double fps = static_cast<double>(config.fps_num) / config.fps_den;
+        CFRef rate(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &fps));
+        set(kVTCompressionPropertyKey_ExpectedFrameRate, rate.get(), "ExpectedFrameRate");
+    }
+    if (config.quality) {
+        CFRef quality(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &*config.quality));
+        set(kVTCompressionPropertyKey_Quality, quality.get(), "Quality");
+    } else set_integer(kVTCompressionPropertyKey_AverageBitRate, config.bitrate, "AverageBitRate");
+    if (!source_format) {
+        set(kVTCompressionPropertyKey_ColorPrimaries, kCMFormatDescriptionColorPrimaries_ITU_R_709_2, "ColorPrimaries");
+        set(kVTCompressionPropertyKey_TransferFunction, kCMFormatDescriptionTransferFunction_ITU_R_709_2, "TransferFunction");
+        set(kVTCompressionPropertyKey_YCbCrMatrix, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2, "YCbCrMatrix");
+    } else {
+        const struct { CFStringRef source; CFStringRef destination; const char* name; } keys[] = {
+            {kCMFormatDescriptionExtension_ColorPrimaries, kVTCompressionPropertyKey_ColorPrimaries, "ColorPrimaries"},
+            {kCMFormatDescriptionExtension_TransferFunction, kVTCompressionPropertyKey_TransferFunction, "TransferFunction"},
+            {kCMFormatDescriptionExtension_YCbCrMatrix, kVTCompressionPropertyKey_YCbCrMatrix, "YCbCrMatrix"},
+            {kCMFormatDescriptionExtension_PixelAspectRatio, kVTCompressionPropertyKey_PixelAspectRatio, "PixelAspectRatio"},
+            {kCMFormatDescriptionExtension_CleanAperture, kVTCompressionPropertyKey_CleanAperture, "CleanAperture"},
+        };
+        for (const auto& key : keys) {
+            if (const auto value = CMFormatDescriptionGetExtension(source_format, key.source)) {
+                set(key.destination, value, key.name);
+            }
+        }
     }
 }
 

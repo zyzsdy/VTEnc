@@ -8,7 +8,7 @@
 
 namespace vtenc {
 
-enum class Command { help, version, check_device, check_features, encode };
+enum class Command { help, version, check_device, check_features, encode, transcode };
 enum class Codec { h264, hevc };
 
 struct ProbeConfig {
@@ -29,6 +29,7 @@ struct EncodeConfig {
     std::int32_t gop = 60;
     std::int32_t bitrate = 5'000'000; // AverageBitRate, bits/s; unused when quality is set.
     std::optional<double> quality;
+    bool copy_audio = true; // Container jobs copy the first audio track, when present.
 };
 
 struct CommandLine {

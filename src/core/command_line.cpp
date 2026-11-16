@@ -2,6 +2,9 @@
 
 #include <charconv>
 #include <cmath>
+#include <filesystem>
+#include <algorithm>
+#include <cctype>
 #include <limits>
 #include <numeric>
 #include <locale>
@@ -53,6 +56,11 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         }
         if (arg == "--synthetic") {
             synthetic = true;
+            encode_options = true;
+            continue;
+        }
+        if (arg == "--audio-copy" || arg == "--no-audio") {
+            result.encode.copy_audio = arg == "--audio-copy";
             encode_options = true;
             continue;
         }
@@ -120,8 +128,31 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (result.encode.output.empty() || result.encode.output == "-") {
             throw std::invalid_argument("Encoding requires -o output-file (stdout is not supported)");
         }
-        if (!seen.contains("--input-res")) throw std::invalid_argument("Encoding requires --input-res WIDTHxHEIGHT");
-        if (!seen.contains("--frames")) throw std::invalid_argument("Encoding requires --frames COUNT");
+        const auto extension = [](const std::string& path) {
+            auto ext = std::filesystem::path(path).extension().string();
+            std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return ext;
+        };
+        const auto input_ext = extension(result.encode.input);
+        if (!synthetic && (input_ext == ".mp4" || input_ext == ".mov")) {
+            result.command = Command::transcode;
+            const auto output_ext = extension(result.encode.output);
+            if (output_ext != ".mp4" && output_ext != ".mov") {
+                throw std::invalid_argument("Container transcoding requires an .mp4 or .mov output");
+            }
+            if (seen.contains("--input-res") || seen.contains("--frames") || seen.contains("--fps")) {
+                throw std::invalid_argument("Container transcoding preserves source dimensions/timing; --input-res, --frames and --fps are raw-only");
+            }
+            if (seen.contains("--audio-copy") && seen.contains("--no-audio")) {
+                throw std::invalid_argument("--audio-copy and --no-audio are mutually exclusive");
+            }
+        } else {
+            if (!seen.contains("--input-res")) throw std::invalid_argument("Encoding requires --input-res WIDTHxHEIGHT");
+            if (!seen.contains("--frames")) throw std::invalid_argument("Encoding requires --frames COUNT");
+            if (seen.contains("--audio-copy") || seen.contains("--no-audio")) {
+                throw std::invalid_argument("Audio options require MP4/MOV input");
+            }
+        }
         if (result.encode.input == "-") throw std::invalid_argument("Raw input must be a regular file; stdin is not supported");
         if (seen.contains("--bitrate") && seen.contains("--quality")) {
             throw std::invalid_argument("--bitrate and --quality are mutually exclusive");
@@ -143,6 +174,9 @@ Usage:
   vtenc --version
   vtenc --check-device
   vtenc --check-features [--codec h264|hevc] [--output-depth 8|10]
+  vtenc -i input.mp4|input.mov -o output.mp4|output.mov
+        [--codec h264|hevc] [--output-depth 8|10] [--audio-copy | --no-audio]
+        [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
         --frames COUNT [--codec h264|hevc] [--output-depth 8|10]
         [--fps NUM[/DEN]] [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
@@ -157,7 +191,9 @@ P1 disables frame reordering. --quality is native VT Quality, not CRF/CQP.
 SIGINT drains submitted frames and discards the incomplete output (exit 130).
 Feature probing creates a hardware-only 1920x1080 VideoToolbox session.
 Listed properties are not validated value combinations; the probe encodes no frames.
-File transcoding is not implemented yet.
+MP4/MOV: hardware-only decode and encode, first audio track copied by default.
+Source dimensions, PTS, VFR and display transform are preserved. No depth conversion.
+SDR progressive video only; HDR, Dolby Vision and interlaced input are rejected.
 Exit codes: 0 success, 1 runtime/hardware failure, 2 invalid arguments, 130 cancelled.
 )";
 }

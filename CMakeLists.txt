@@ -36,12 +36,15 @@ target_link_libraries(vtenc_core PRIVATE vtenc_options)
 
 add_library(vtenc_apple STATIC
     src/apple/encoder.cpp
+    src/apple/transcode.cpp
+    src/apple/source_format.cpp
+    src/apple/media_io.mm
     src/apple/bitstream_output.cpp
     src/apple/capability_probe.cpp
     src/apple/metal_device.mm)
 target_include_directories(vtenc_apple PUBLIC include)
 target_link_libraries(vtenc_apple PRIVATE vtenc_options)
-foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox Foundation Metal)
+foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox Foundation Metal AVFoundation)
     find_library(VTENC_${framework}_LIBRARY ${framework} REQUIRED)
     target_link_libraries(vtenc_apple PRIVATE "${VTENC_${framework}_LIBRARY}")
 endforeach()
@@ -62,4 +65,9 @@ if(BUILD_TESTING)
     target_link_libraries(vtenc_bitstream_test PRIVATE vtenc_apple vtenc_core vtenc_options)
     add_test(NAME vtenc.bitstream COMMAND vtenc_bitstream_test "${CMAKE_CURRENT_BINARY_DIR}/test-output")
     set_tests_properties(vtenc.bitstream PROPERTIES LABELS "bitstream" TIMEOUT 15)
+    add_executable(vtenc_timeline_test tests/timeline_test.cpp)
+    target_include_directories(vtenc_timeline_test PRIVATE src/apple)
+    target_link_libraries(vtenc_timeline_test PRIVATE vtenc_apple vtenc_core vtenc_options)
+    add_test(NAME vtenc.timeline COMMAND vtenc_timeline_test)
+    set_tests_properties(vtenc.timeline PROPERTIES LABELS "timeline" TIMEOUT 15)
 endif()

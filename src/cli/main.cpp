@@ -55,17 +55,22 @@ int main(int argc, char* argv[]) {
             for (const auto& name : capabilities.property_names) std::cout << "  " << name << '\n';
             break;
         }
-        case vtenc::Command::encode: {
+        case vtenc::Command::encode:
+        case vtenc::Command::transcode: {
             InterruptHandler handler;
-            const auto result = vtenc::encode_video(options.encode, interrupted);
+            const bool transcode = options.command == vtenc::Command::transcode;
+            const auto result = transcode ? vtenc::transcode_file(options.encode, interrupted)
+                                          : vtenc::encode_video(options.encode, interrupted);
             if (result.cancelled) {
                 std::cerr << "vtenc: cancelled; drained " << result.frames << " frames; incomplete output discarded\n";
                 return 130;
             }
             std::cout << "Hardware verified: yes\nEncoded " << result.frames << " frames, " << result.bytes
                       << " bytes (" << vtenc::codec_name(options.encode.video.codec) << ' '
-                      << options.encode.video.bit_depth << "-bit)\nOutput: " << options.encode.output
-                      << "\nTimestamps: " << options.encode.output << ".timestamps.csv\n";
+                      << options.encode.video.bit_depth << "-bit)\nOutput: " << options.encode.output << '\n';
+            if (transcode) {
+                std::cout << "Hardware decoder verified: yes\nAudio samples copied (first track): " << result.audio_samples << '\n';
+            } else std::cout << "Timestamps: " << options.encode.output << ".timestamps.csv\n";
             break;
         }
         }

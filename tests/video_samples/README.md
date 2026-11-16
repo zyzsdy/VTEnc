@@ -72,3 +72,10 @@ python3 tests/video_samples/prepare.py verify
 [verification.json](verification.json) 是本次成功验证的精简快照；重新运行写入 `reports/verification.json`，同时生成逐文件 FFprobe 报告、场检测日志、VFR 帧 PTS 和包时间戳。四个派生文件已在空输出目录重新生成，SHA-256 全部一致。
 
 FFmpeg 的软件编解码只用于离线制作和核对测试输入，不链接到 VTEnc，不改变其强制硬件路径。本次未运行 VTEnc 硬件解码、HDR 渲染或全量 CTest；FFmpeg 解码成功不等于 VideoToolbox 硬件支持，也不等于 Dolby Vision 显示效果通过认证。
+
+
+## P2 原生转码集成检查
+
+`python3 tests/transcode_hardware.py` 从仓库根目录显式执行，直接使用本目录的 13 个原始样片，并以 VFR 样片无重编码派生 MOV。成功用例检查真实硬解/硬编、码流 Profile/位深、逐帧 PTS，以及 AAC 包哈希、时间戳和解码 PCM；HDR / 交错输入检查明确拒绝。结果见 [P2 验证记录](../../docs/P2验证.md)。
+
+原始 `decode/h264_8bit.mp4` 的首两个 AAC 包存在重复 PTS，P2 默认音轨复制会明确报错；使用 `--no-audio` 可转码其完整 82 帧视频。样片保持原样，没有为了通过测试修补输入。正常音轨复制与同步使用 `timing/vfr_h264_aac.mp4` 验证。

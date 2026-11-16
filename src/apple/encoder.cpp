@@ -157,29 +157,6 @@ private:
     std::unique_ptr<FILE, Closer> file_;
 };
 
-void configure(VTCompressionSessionRef session, const EncodeConfig& config) {
-    const auto set = [&](CFStringRef key, CFTypeRef value, const char* name) {
-        check_status(VTSessionSetProperty(session, key, value), std::string("VTSessionSetProperty(") + name + ")");
-    };
-    const auto set_integer = [&](CFStringRef key, std::int32_t value, const char* name) {
-        CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &value));
-        set(key, number.get(), name);
-    };
-    set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, "AllowFrameReordering");
-    set(kVTCompressionPropertyKey_RealTime, kCFBooleanFalse, "RealTime");
-    set_integer(kVTCompressionPropertyKey_MaxKeyFrameInterval, config.gop, "MaxKeyFrameInterval");
-    // Floating point is only an encoder rate hint. All submitted times use CMTime integers.
-    const double fps = static_cast<double>(config.fps_num) / config.fps_den;
-    CFRef rate(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &fps));
-    set(kVTCompressionPropertyKey_ExpectedFrameRate, rate.get(), "ExpectedFrameRate");
-    if (config.quality) {
-        CFRef quality(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &*config.quality));
-        set(kVTCompressionPropertyKey_Quality, quality.get(), "Quality");
-    } else set_integer(kVTCompressionPropertyKey_AverageBitRate, config.bitrate, "AverageBitRate");
-    set(kVTCompressionPropertyKey_ColorPrimaries, kCMFormatDescriptionColorPrimaries_ITU_R_709_2, "ColorPrimaries");
-    set(kVTCompressionPropertyKey_TransferFunction, kCMFormatDescriptionTransferFunction_ITU_R_709_2, "TransferFunction");
-    set(kVTCompressionPropertyKey_YCbCrMatrix, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2, "YCbCrMatrix");
-}
 
 } // namespace
 
@@ -195,7 +172,7 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
     OutputQueue queue; // Must outlive the session, including error/early-return teardown.
     CompressionSession session;
     create_hardware_session(session, config.video, &OutputQueue::callback, &queue);
-    configure(session.value, config);
+    configure_hardware_encoder(session.value, config);
     check_status(VTCompressionSessionPrepareToEncodeFrames(session.value), "VTCompressionSessionPrepareToEncodeFrames");
     verify_hardware(session.value);
     std::int64_t submitted = 0;
