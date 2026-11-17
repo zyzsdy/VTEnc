@@ -12,6 +12,75 @@ endfunction()
 check_cli(0 "Usage:" "^$")
 check_cli(0 "VTEnc [0-9]+\\.[0-9]+\\.[0-9]+" "^$" --version)
 check_cli(0 "Compressed input: avformat probes any format" "^$" --help)
+
+# Help shares the complete version/build banner and keeps details beside each option.
+execute_process(COMMAND "${VTENC}" --version
+    RESULT_VARIABLE version_status OUTPUT_VARIABLE version ERROR_VARIABLE version_error)
+execute_process(COMMAND "${VTENC}" --help
+    RESULT_VARIABLE help_status OUTPUT_VARIABLE full_help ERROR_VARIABLE help_error)
+execute_process(COMMAND "${VTENC}"
+    RESULT_VARIABLE default_status OUTPUT_VARIABLE default_help ERROR_VARIABLE default_error)
+string(FIND "${full_help}" "${version}\nVTEnc" banner_position)
+if(NOT version_status EQUAL 0 OR NOT help_status EQUAL 0 OR NOT default_status EQUAL 0
+   OR NOT version_error STREQUAL "" OR NOT help_error STREQUAL "" OR NOT default_error STREQUAL ""
+   OR NOT version MATCHES "Build: [^\n]+C\\+\\+20" OR NOT banner_position EQUAL 0
+   OR NOT full_help STREQUAL default_help)
+    message(FATAL_ERROR "Help must start with the version/build banner; no arguments must show full help")
+endif()
+string(FIND "${full_help}" "Usage:" usage_position)
+string(FIND "${full_help}" "Examples:" examples_position)
+string(FIND "${full_help}" "Commands and diagnostics:" options_position)
+if(usage_position LESS 0 OR examples_position LESS usage_position OR options_position LESS examples_position)
+    message(FATAL_ERROR "Help must show usage and examples before detailed option paragraphs")
+endif()
+
+function(check_help_filter flag keyword expected_names)
+    execute_process(COMMAND "${VTENC}" "${flag}" "${keyword}"
+        RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    string(FIND "${output}" "${version}\n" banner_position)
+    if(NOT status EQUAL 0 OR NOT error STREQUAL "" OR NOT banner_position EQUAL 0)
+        message(FATAL_ERROR "${flag} ${keyword}: invalid filtered help: ${output} ${error}")
+    endif()
+    string(REGEX MATCHALL "\n  [^ \n][^\n]*" headings "${output}")
+    set(names "")
+    foreach(heading IN LISTS headings)
+        string(REGEX MATCH "--[a-z-]+" name "${heading}")
+        list(APPEND names "${name}")
+    endforeach()
+    if(NOT names STREQUAL expected_names)
+        message(FATAL_ERROR "${flag} ${keyword}: expected ${expected_names}, got ${names}")
+    endif()
+    # A single match must retain its entire paragraph, exactly as in full help.
+    list(LENGTH names count)
+    if(count EQUAL 1)
+        string(LENGTH "${version}\n" banner_length)
+        string(SUBSTRING "${output}" ${banner_length} -1 paragraph)
+        string(FIND "${full_help}" "${paragraph}" paragraph_position)
+        if(paragraph_position LESS 0)
+            message(FATAL_ERROR "${flag} ${keyword}: filtered help lost or changed option details")
+        endif()
+    endif()
+endfunction()
+
+check_help_filter(--help vpp "--vpp-yadif;--vpp-ivtc;--vpp-colorspace;--vpp-subburn")
+check_help_filter(--help vpp-yadif "--vpp-yadif")
+check_help_filter(-h yadif "--vpp-yadif")
+check_help_filter(--help bitrate "--bitrate;--max-bitrate;--bitrate-window;--audio-bitrate")
+check_help_filter(--help quality "--quality")
+check_help_filter(--help input "--input;--input-res;--input-matrix;--input-chroma-loc")
+check_help_filter(--help help "--help")
+check_cli(0 "No options match keyword: no-such-option" "^$" --help no-such-option)
+check_cli(0 "No options match keyword: VPP" "^$" --help VPP)
+check_cli(2 "^$" "Unknown argument" --help vpp extra)
+check_cli(2 "^$" "Duplicate option" --help vpp -h)
+check_cli(2 "^$" "exactly one command" --help vpp --version)
+check_cli(2 "^$" "cannot be combined" --help vpp -o unused.mp4)
+execute_process(COMMAND "${VTENC}" --help ""
+    RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT status EQUAL 2 OR NOT output STREQUAL "" OR NOT error MATCHES "keyword must not be empty")
+    message(FATAL_ERROR "Empty help keyword must fail explicitly: ${output} ${error}")
+endif()
+
 check_cli(2 "^$" "Unknown argument" --bogus)
 check_cli(2 "^$" "Missing value" --check-features --codec)
 check_cli(2 "^$" "Supported codecs" --check-features --codec av1)
@@ -88,8 +157,8 @@ check_cli(2 "^$" "exceeds 32-bit range" -i raw.nv12 -o out.h264 --input-res 720x
 check_cli(2 "^$" "exceeds 32-bit range" -i raw.nv12 -o out.h264 --input-res 720x480 --frames 1 --fps 2147483647 --deinterlace bob --field-order tff)
 
 # Decode mode selection is explicit, exclusive and compressed-input only.
-check_cli(0 "--avhw: avformat demuxing, require hardware decoding" "^$" --help)
-check_cli(0 "--avsw: use FFmpeg" "^$" --help)
+check_cli(0 "Require hardware decoding through VideoToolbox" "^$" --help)
+check_cli(0 "Uses FFmpeg libavformat demuxing and libavcodec software decoding" "^$" --help)
 check_cli(2 "^$" "mutually exclusive" ${file_job} --avhw --avsw)
 check_cli(2 "^$" "mutually exclusive" ${file_job} --avsw --avhw)
 check_cli(2 "^$" "Duplicate option" ${file_job} --avsw --avsw)
@@ -172,7 +241,7 @@ check_cli(2 "^$" "PQ or HLG input" ${file_job} --vpp-colorspace hdr2sdr=hable,tr
 check_cli(2 "^$" "SDR output transfer" ${file_job} --vpp-colorspace hdr2sdr=hable,transfer=pq:hlg)
 
 # IVTC optional argument syntax and strict supported parameter subset.
-check_cli(0 "--vpp-ivtc performs Metal C/P/N" "^$" --help)
+check_cli(0 "Performs Metal C/P/N field matching" "^$" --help)
 check_cli(1 "^$" "avformat_open_input" -i missing-ivtc.mp4 -o output.mp4 --vpp-ivtc --field-order tff)
 check_cli(1 "^$" "avformat_open_input" -i missing-ivtc.mp4 -o output.mp4 --vpp-ivtc cycle=0,post=0,nt=0,cthresh=255,combpel=128,dthresh=0)
 check_cli(2 "^$" "requires compressed input" ${job} --vpp-ivtc)

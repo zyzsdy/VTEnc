@@ -141,12 +141,13 @@ struct EncodeConfig {
 struct CommandLine {
     bool json_status = false;
     Command command = Command::help;
+    std::string help_keyword;
     ProbeConfig probe;
     EncodeConfig encode;
 };
 
 [[nodiscard]] CommandLine parse_command_line(std::span<const std::string_view> args);
 [[nodiscard]] std::string_view codec_name(Codec codec);
-[[nodiscard]] std::string_view help_text();
+[[nodiscard]] std::string help_text(std::string_view keyword = {});
 
 } // namespace vtenc

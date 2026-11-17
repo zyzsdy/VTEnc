@@ -20,6 +20,11 @@ extern "C" {
 #include <vector>
 
 namespace {
+void print_version(std::ostream& output) {
+    output << "VTEnc " << VTENC_VERSION << " (macOS arm64; VideoToolbox hardware encoder)\n"
+           << "Build: " << VTENC_BUILD_INFO << '\n';
+}
+
 vtenc::StatusReporter* active_reporter = nullptr;
 void ffmpeg_log(void* context, int level, const char* format, va_list args) noexcept {
     if (level > av_log_get_level()) return;
@@ -92,11 +97,12 @@ int main(int argc, char* argv[]) {
         }
         switch (options.command) {
         case vtenc::Command::help:
-            std::cout << vtenc::help_text();
+            print_version(std::cout);
+            std::cout << '\n' << vtenc::help_text(options.help_keyword);
             break;
         case vtenc::Command::version:
             if (json) reporter.event("version", "\"version\":" + vtenc::json_string(VTENC_VERSION) + ",\"platform\":\"macos-arm64\"");
-            else std::cout << "VTEnc " << VTENC_VERSION << " (macOS arm64; VideoToolbox hardware encoder)\n";
+            else print_version(std::cout);
             break;
         case vtenc::Command::check_device:
             std::cout << vtenc::metal_device_name() << '\n';

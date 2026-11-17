@@ -42,7 +42,7 @@ target_compile_options(vtenc_options INTERFACE
     -Werror=unguarded-availability
     "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 
-add_library(vtenc_core STATIC src/core/command_line.cpp src/core/colorspace.cpp src/core/status.cpp src/core/subtitle.cpp)
+add_library(vtenc_core STATIC src/core/command_line.cpp src/core/help.cpp src/core/colorspace.cpp src/core/status.cpp src/core/subtitle.cpp)
 target_include_directories(vtenc_core PUBLIC include)
 target_link_libraries(vtenc_core PRIVATE vtenc_options)
 
@@ -94,6 +94,8 @@ endforeach()
 
 add_executable(vtenc src/cli/main.cpp)
 target_compile_definitions(vtenc PRIVATE VTENC_VERSION="${PROJECT_VERSION}${VTENC_VERSION_SUFFIX}")
+target_compile_definitions(vtenc PRIVATE
+    VTENC_BUILD_INFO="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, C++${CMAKE_CXX_STANDARD}, $<CONFIG>")
 target_link_libraries(vtenc PRIVATE vtenc_apple vtenc_options)
 install(TARGETS vtenc RUNTIME DESTINATION bin)
 install(FILES THIRD_PARTY_NOTICES.md DESTINATION share/doc/vtenc)
