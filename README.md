@@ -393,7 +393,11 @@ Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/
 
 IVTC 在裁剪、缩放和色彩转换之前执行。决定去重的完整周期按原始首尾时间均分为四个输出，整数有理数计算，保留非零 PTS 起点与周期总时长；纯 hard telecine CFR 输入得到 4/5 帧率，soft telecine 先展开再还原，混合/VFR 保留每周期时长。尾部不足五帧全部输出并保留原区间，避免拉长片尾。RFF 将每个编码图片的原始时间区间按场数精确拆分，既支持 3/2 场变时长标记也支持固定编码图片时长。启用展开时封装时间基预留 12 倍精度，`cycle=5` 再扩大四倍，超出 CoreMedia 32-bit 时间基范围时明确失败。音轨继续按原时间轴逐包复制。`-o -` 的码流与 stderr 诊断分离；启动 stdout 封装后仍禁止从头重试。
 
-逐帧元数据来自 libavcodec 解码帧、原生 H.264 的 FFmpeg 元数据解析器，或独立的 HEVC SPS/PPS/VUI 与 picture-timing SEI 解析器；硬解路径不启用隐藏的软件解码。HEVC 按当前图片的 slice→PPS→SPS 关系读取 `pic_struct`、`source_scan_type` 和 `duplicate_flag`，支持 MP4 hvcC/长度前缀及 Annex B 参数集。软解通过 packet/frame opaque 数据传递标记，硬解随图片排序，B 帧重排后仍按显示顺序处理。支持完整帧 `pic_struct=0/3/4/5/6/7/8`；`duplicate_flag` 不当作额外重复场。SPS 要求的 picture-timing 缺失、标记截断或保留值均明确报错，不触发软解重试；多层 HEVC 和独立单场编码暂不支持。`expand=off,mixed=true` 可保留 soft telecine 的原编码图片区间；已知纯 hard telecine 可用 `expand=off` 跳过原生 RFF 解析。
+逐帧元数据来自 libavcodec 解码帧、原生 H.264 的 FFmpeg 元数据解析器，或独立的 HEVC SPS/PPS/VUI 与 picture-timing SEI 解析器；硬解路径不启用隐藏的软件解码。HEVC 按当前图片的 slice→PPS→SPS 关系读取 `pic_struct`、`source_scan_type` 和 `duplicate_flag`，支持 MP4 hvcC/长度前缀及 Annex B 参数集。软解通过 packet/frame opaque 数据传递标记，硬解随图片排序，B 帧重排后仍按显示顺序处理。支持完整帧 `pic_struct=0/3/4/5/6/7/8`，以及 `field_seq_flag=1` 的独立单场 `pic_struct=1/2/9/10/11/12`；`duplicate_flag` 不当作额外重复场。SPS 要求的 picture-timing 缺失、标记截断、保留值或 `pic_struct` 与 `field_seq_flag` 冲突均明确报错，不触发软解重试；多层 HEVC 仍不支持。`expand=off,mixed=true` 可保留 soft telecine 的原编码图片区间；H.264 纯 hard telecine 可用 `expand=off` 跳过原生 RFF 解析，HEVC 在 IVTC 模式下始终解析场结构。
+
+HEVC 独立场先按显示顺序配对：Metal 将半高场图片的 Y/UV 行交织为完整高度，再执行 RFF/IVTC。`pic_struct=9/10` 的前场提示参与 P 匹配，11/12 的后场提示参与 C 匹配；无提示时使用像素评分。明示的前场配对关系优先于场景切换的 SAD 启发式。实际空间奇偶由码流决定，`--field-order` 不会把上场误作下场。组帧不受 `expand=off` 影响，可直接使用 `--vpp-ivtc mixed=true`。
+
+片尾落单场、缺少前配对场或同奇偶场冲突会输出诊断，通过 Metal 空间插值补齐缺失行，保留该场原始时间区间，并隔断跨边界匹配和去重；缺少末场有效时长则报错。裁剪、缩放和硬件编码使用组帧后的完整高度，SAR 保留，clean aperture 的垂直坐标同步扩大。解码尺寸或色彩布局中途改变仍明确拒绝。本机已验证原生 HEVC 单场硬解；其他系统若无法返回逐图片半高栅格，按现有硬解失败策略处理。
 
 这不是完整 NVEnc 兼容层：未移植全片预扫描、cadence lock、双场序置信度分类或五帧 BWDIF，未强制上游式全片 CFR。混合分类是保守的局部像素/元数据判断，不能保证所有噪声、字幕、静止段和剪辑断点都恢复严格电影 cadence；证据不足或不足五帧时允许保留重复。`mixed=false,cycle=5` 仍明确假设 3:2；`cycle=0` 保留展开后的显示帧数量。压缩破坏和真正交错片段中的不可恢复场仍可能需要插值。
 
@@ -407,6 +411,7 @@ python3 tests/ivtc_hardware.py --vtenc build/dev/vtenc
 python3 tests/rff_hardware.py --vtenc build/dev/vtenc
 ctest --preset dev -R '^vtenc.hevc-cadence$'
 python3 tests/hevc_rff_hardware.py --vtenc build/dev/vtenc
+python3 tests/hevc_fields_hardware.py --vtenc build/dev/vtenc
 ```
 
 2026-11-17 本机验证覆盖 IVTC/RFF 数值与调度、原有 9 个 hard-telecine 输出、12 个 H.264 soft/mixed 输出，以及 HEVC 元数据解析、Main/Main10 混合码流和 B 帧重排；原始 telecine 的 180→144 帧恢复平均 PSNR 为 43.34 dB。详见 [Metal IVTC 验证记录](docs/MetalIVTC验证.md)。

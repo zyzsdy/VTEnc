@@ -400,8 +400,13 @@ original RFF flags retain their per-picture field order. Mixed mode requires
 per-picture metadata. Native H.264 parses SEI without software decoding.
 HEVC parses SPS/PPS/VUI and picture-timing for both native and software decode,
 including reordered pictures and in-band parameter sets (hvcC or Annex B).
-Missing required timing, reserved pic_struct, multilayer or separately coded
-HEVC fields fail explicitly; complete-frame soft/hard telecine is supported.
+HEVC single-field pictures (pic_struct=1/2/9..12) are paired in Metal before
+RFF/IVTC, including when expand=off. Bitstream spatial parity takes precedence
+over --field-order; previous/next complementary-field hints guide matching.
+Unmatched fields are spatially reconstructed with diagnostics and retain their
+own intervals; a missing final field duration is an error. Crop/resize uses the
+assembled full-height raster. Missing required timing, reserved/contradictory
+pic_struct and multilayer HEVC fail explicitly.
 Raw IVTC input, cadence lock and other NVEnc IVTC parameters are unsupported.
 Interlaced input requires explicit --vpp-ivtc or --deinterlace bob. Bob produces
 two Metal outputs per input. Auto field order requires unambiguous metadata; tff/bff overrides it.

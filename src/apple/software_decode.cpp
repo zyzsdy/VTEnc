@@ -266,8 +266,7 @@ SoftwareFrames::SoftwareFrames(const EncodeConfig& config, ContainerInput& input
     if (!s.decoder) throw std::bad_alloc();
     s.check(avcodec_parameters_to_context(s.decoder, parameters), "avcodec_parameters_to_context");
     s.decoder->pkt_timebase = input.video_time_base();
-    s.packet_cadence = parameters->codec_id == AV_CODEC_ID_HEVC && config.filter.ivtc.enabled &&
-        (config.filter.ivtc.expand != RffExpansion::off || config.filter.ivtc.mixed);
+    s.packet_cadence = parameters->codec_id == AV_CODEC_ID_HEVC && config.filter.ivtc.enabled;
     // Carry metadata with its picture through frame threading and B-frame
     // reordering; packet order and a PTS lookup are not frame ownership.
     if (s.packet_cadence) s.decoder->flags |= AV_CODEC_FLAG_COPY_OPAQUE;

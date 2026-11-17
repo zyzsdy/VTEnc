@@ -91,7 +91,7 @@ struct IvtcFrames::Impl {
             unsigned first = 0;
             const auto& cadence = current->cadence;
             const bool progressive = cadence.known && !cadence.interlaced && !cadence.expanded;
-            if (cadence.expanded) first = cadence.first == FieldOrder::bff ? 1U : 0U;
+            if (cadence.expanded || cadence.assembled_fields) first = cadence.first == FieldOrder::bff ? 1U : 0U;
             else if (config.field_order != FieldOrder::automatic) first = config.field_order == FieldOrder::bff ? 1U : 0U;
             else if (progressive) first = field.value_or(0U); // C is invariant to parity.
             else if (cadence.known && cadence.first != FieldOrder::automatic) first = cadence.first == FieldOrder::bff ? 1U : 0U;
@@ -108,7 +108,7 @@ struct IvtcFrames::Impl {
             if (config.ivtc.mixed && following) {
                 const auto& upcoming = following->cadence;
                 std::optional<unsigned> next_first;
-                if (upcoming.expanded) next_first = upcoming.first == FieldOrder::bff ? 1U : 0U;
+                if (upcoming.expanded || upcoming.assembled_fields) next_first = upcoming.first == FieldOrder::bff ? 1U : 0U;
                 else if (config.field_order != FieldOrder::automatic) next_first = config.field_order == FieldOrder::bff ? 1U : 0U;
                 else if (upcoming.known && upcoming.interlaced && upcoming.first != FieldOrder::automatic)
                     next_first = upcoming.first == FieldOrder::bff ? 1U : 0U;
@@ -121,7 +121,7 @@ struct IvtcFrames::Impl {
             const auto type = CVPixelBufferGetPixelFormatType(cur);
             const bool ten = type == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || type == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
             const auto scene_limit = static_cast<std::uint64_t>(CVPixelBufferGetWidth(cur)) * CVPixelBufferGetHeight(cur) * (ten ? 1023U : 255U) / 5;
-            if (previous && gpu->difference(prev, cur) > scene_limit) { prev = cur; last_match = 0; }
+            if (previous && cadence.pairing != FieldPairing::previous && gpu->difference(prev, cur) > scene_limit) { prev = cur; last_match = 0; }
             if (following && gpu->difference(cur, next) > scene_limit) next = cur;
             const auto scores = gpu->score(prev, cur, next, first);
             // At a cut-in, N would consume the next film exposure and add a
@@ -140,6 +140,12 @@ struct IvtcFrames::Impl {
             // their rank). Keep P through that ambiguity; a combed P releases it.
             if (previous && last_match == 1 && match == 2 && scores[1].maximum < 65 &&
                 scores[1].comb <= scores[2].comb + 6) match = 1;
+            // HEVC explicitly associates this leading field with the previous
+            // opposite field (P), or the following field inside this raster (C).
+            if (cadence.assembled_fields) {
+                if (cadence.pairing == FieldPairing::previous && prev != cur) match = 1;
+                else if (cadence.pairing == FieldPairing::next) match = 0;
+            }
             const bool direct = config.ivtc.mixed && ((progressive && scores[0].maximum < 65) ||
                 (cadence.repeat_fields > 0 && config.ivtc.expand == RffExpansion::off));
             if (direct) match = 0;
@@ -204,7 +210,7 @@ struct IvtcFrames::Impl {
 };
 IvtcFrames::IvtcFrames(std::unique_ptr<DecodedFrames> source, CMFormatDescriptionRef format,
                      const FilterConfig& config, const volatile std::sig_atomic_t& cancelled)
-    : impl_(std::make_unique<Impl>(std::make_unique<RffFrames>(std::move(source), config, cancelled), format, config, cancelled)) {}
+    : impl_(std::make_unique<Impl>(std::make_unique<RffFrames>(std::make_unique<FieldFrames>(std::move(source), config, cancelled), config, cancelled), format, config, cancelled)) {}
 IvtcFrames::~IvtcFrames() = default;
 std::unique_ptr<DecodedFrame> IvtcFrames::next() {
     auto& s = *impl_;

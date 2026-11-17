@@ -15,6 +15,29 @@ using IvtcScores = std::array<IvtcScore, 3>; // C, P, N
 [[nodiscard]] CMTime ivtc_divide(CMTime duration, int divisor);
 [[nodiscard]] std::int32_t ivtc_output_timescale(std::int32_t source, const IvtcConfig& config);
 
+// Packed single-field HEVC pictures -> full-height display rasters, in display order.
+class FieldFrames final : public DecodedFrames {
+public:
+    FieldFrames(std::unique_ptr<DecodedFrames> source, const FilterConfig& config,
+                const volatile std::sig_atomic_t& cancelled);
+    ~FieldFrames() override;
+    [[nodiscard]] std::unique_ptr<DecodedFrame> next() override;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+class GpuFieldPair {
+public:
+    explicit GpuFieldPair(CVPixelBufferRef source);
+    ~GpuFieldPair();
+    // Null second field reconstructs missing lines spatially; no temporal fabrication.
+    [[nodiscard]] CFRef<CVPixelBufferRef> process(CVPixelBufferRef first, CVPixelBufferRef second, unsigned parity);
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 // Streaming equivalent of the upstream pending-top/pending-bottom RFF schedule.
 // Materializes field pairs in Metal; never duplicates a whole interval's time.
 class RffFrames final : public DecodedFrames {

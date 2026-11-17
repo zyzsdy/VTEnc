@@ -98,10 +98,10 @@ HEVC 新增独立 C++20 元数据解析器 `src/apple/hevc_cadence.cpp`，按 [I
 - hvcC 的 1/2/3/4 字节 NAL 长度和 Annex B 均支持；处理防竞争字节、多个 SEI、扩展 payload type/size、子层 PTL、scaling list、显式/预测 RPS、长参考及 VUI 可选项。
 - 每个完整 access unit 从 slice 的 PPS ID 定位 SPS，支持带内参数集更新、多个 PPS/SPS 和多 slice；不沿用前一图片的 SEI。VUI 缺失时按 PTL 推导 `frame_field_info_present_flag`。
 - `pic_struct=0/3/4` 不增加场，5/6 增加一场并分别使用 TFF/BFF，7/8 增加 2/4 场。`source_scan_type` 参与源扫描类型判断；`duplicate_flag` 不等于 RFF，不增加显示场。HRD 延迟语法位于这些字段之后；本实现只读取 cadence，不使用 HRD 改写容器时间戳。
-- 软解用 `AV_CODEC_FLAG_COPY_OPAQUE` 将每个包的解析结果传给对应解码帧，跨 frame threading 和 B 帧重排；没有对应标记时直接失败。原生路径在显示队列排序前绑定标记。VideoToolbox `BothFields` 根据 SPS 的 `field_seq_flag` 设置，不把 soft telecine 的显示场当作编码场。
-- 多层 NAL、独立单场图片/`field_seq_flag=1`、保留枚举、截断或缺失必需 SEI 明确拒绝。目标仍是完整帧栅格的 soft/hard telecine，不宣称支持独立场图片拼接。完整 slice/HRD 码流一致性由解码器负责。
+- 软解用 `AV_CODEC_FLAG_COPY_OPAQUE` 将每个包的解析结果传给对应解码帧，跨 frame threading 和 B 帧重排；没有对应标记时直接失败。原生路径在显示队列排序前绑定标记。H.264 PAFF/MBAFF 使用 VideoToolbox `BothFields`；HEVC 独立场保留逐图片半高输出，检查回调次数和尺寸，不要求解码器提前织帧。
+- 多层 NAL、保留枚举、截断、缺失必需 SEI、`pic_struct` 与 `field_seq_flag` 冲突明确拒绝。独立单场拼接见下节。完整 slice/HRD 码流一致性由解码器负责。
 
-`vtenc.hevc-cadence`：111 个解析/错误用例通过；覆盖以上语法分支、参数集切换、HRD 数据不误读为 `pic_struct`、跨 access unit 的 SEI 清空和非法输入拒绝。
+初始 HEVC RFF 验证中，`vtenc.hevc-cadence` 的 111 个解析/错误用例通过；覆盖以上语法分支、参数集切换、HRD 数据不误读为 `pic_struct`、跨 access unit 的 SEI 清空和非法输入拒绝。
 
 `tests/hevc_rff_hardware.py` 报告：`build/hardware-tests/hevc-rff-ned_zlp8/report.json`。
 
@@ -116,3 +116,31 @@ HEVC 新增独立 C++20 元数据解析器 `src/apple/hevc_cadence.cpp`，按 [I
 共 40 个成功输出和 6 个错误路径检查。视频始终硬件编码，所有强制硬解用例确认实际硬件解码。结构化夹具逐帧比较已知参考，最低 PSNR 为 56.01 dB；MP4 混合用例逐包保留 119 个 AAC payload、PTS、duration。Annex B 用例只测视频，避免把 TS ADTS→MP4 AAC 的正常封装转换误报为 payload 改变。B 帧用例使用 `expand=off,cycle=0` 单独验证重排后的元数据对应，RFF 展开与混合去重由其他正向用例验证。
 
 本次亦重跑 H.264 RFF 的 12 个成功输出；原有 hard-IVTC 像素核心未修改，不据此重复全量 GPU/CTest。
+
+## HEVC 独立单场配对（2026-11-17）
+
+处理链为解码显示队列 → `FieldFrames` → `RffFrames` → `IvtcFrames` → 空间/色彩滤镜 → 硬件编码。新增功能不需要 CLI 开关，使用 `--vpp-ivtc mixed=true` 即可。
+
+- `pic_struct=1/9/11` 表示上场，2/10/12 表示下场；必须与 SPS `field_seq_flag=1` 一致。保存前/后配对提示与 `duplicate_flag`，后者不生成额外显示时间。即使 `expand=off`，HEVC 仍解析并组装独立场。
+- `FieldFrames` 有界保留当前、下一图片和待配对场，按显示 PTS 计算单场区间。Metal 将 NV12/P010 两个半高场的 Y/UV 行交织为完整栅格；再由既有 IVTC 匹配/去重。首场的前配对提示选择 P，后配对提示选择 C；对方场上的等价提示也会保留。无提示时沿用像素评分。码流空间奇偶优先于用户的时间场序覆盖。
+- 落单场通过 Metal 插值缺失行，保留自身时长并输出诊断；待配对场内和两对之间的奇偶断裂均隔断匹配周期。缺失末场时长明确失败，不从前一场猜测。RFF 同样遵守这些边界。
+- 完整高度传给后续滤镜和编码器。按 H.265 E.3.1 的完整帧 SAR 语义保留像素宽高比；clean aperture 的高度、垂直偏移乘二。场图片的尺寸/像素格式/色彩几何元数据变化仍明确失败，不宣称支持流内布局切换。
+- HEVC 原生解码保留一包一场的半高输出，不设置提前织帧的 `BothFields`；回调次数、丢帧和栅格尺寸必须符合要求。硬解失败仍沿用显式诊断和默认从头软解重试一次的策略，强制 `--avhw` 不回退。编码始终要求并核验硬件。
+
+本次 `vtenc.hevc-cadence` 共 **231** 个语法/错误用例；Metal IVTC 数值与调度共 **233** 个用例，包括新增 87 个单场用例：8/10-bit、limited/full range、上下场、Y/UV 精确逐行比较、落单场插值和 P010 低位检查，3:2 电影还原、关闭 RFF、相反用户场序覆盖、VFR、1–13 场尾部、切入缺场、同奇偶断裂及对方场配对提示。CLI、时间轴和解码重试策略检查通过；未运行全量 CTest。
+
+真实码流测试 `tests/hevc_fields_hardware.py` 使用 VTEnc 硬编码的半高图片，注入合法场序 SPS/VPS/SEI，并由 FFmpeg `trace_headers` 独立检查语法；没有软件压缩编码。Y/UV 均有垂直图案，避免只测横向纹理而漏掉错误行交织。
+
+| 用例 | 结果 |
+| --- | --- |
+| Main/Main10 × TFF/BFF × 有/无配对提示 × 硬解/软解/默认 | 24 个输出，40 场 → 20 个组帧栅格 → 16 个电影帧，完整像素参考最低 PSNR 62.04 dB |
+| 1/3/11 场尾部 × 8/10-bit × 硬解/软解 | 12 个输出，分别保留 1/2/5 个输出帧，最后单场诊断与结束时间准确 |
+| `expand=off,mixed=false` × 8/10-bit × 硬解/软解 | 4 个输出，仍完成场结构解析、组帧及 3:2 去重 |
+| AAC + 4:3 SAR × 8/10-bit × 硬解/软解 | 4 个输出，逐包保留 119 个音频 payload/PTS/duration，输出 SAR 4:3 |
+| 裁剪缩放 × 8/10-bit | 2 个输出，完整栅格上裁剪后得到 160×96、16 帧 |
+| MPEG-TS Annex B × 8/10-bit × 硬解/软解 | 4 个输出，按 90 kHz 源包的实际时间区间验证，无时间漂移 |
+| B 帧单场 × 8/10-bit × 硬解/软解 | 4 个输出，82 场按显示顺序配成 41 帧；逐对核对场奇偶、配对提示和时间轴，采样像素 PSNR 最低 48.37 dB |
+
+共 **54 个成功输出**。所有强制硬解用例验证了实际 VideoToolbox 硬件后端并解码检查成品。本机证据不推广为所有系统、分辨率或 HEVC Profile 的支持承诺。B 帧夹具由现有压缩样片仅改写参数集与 SEI、保留 slice 字节，并将其解释为场栅格；`cycle=0,post=0` 输出与按显示顺序交织的独立解码像素比较，专门验证重排和配对。
+
+报告分别位于 `build/hardware-tests/hevc-fields-p1d139jj/report.json`（50 个）及 `build/hardware-tests/hevc-bfields-v592deuk/report.json`（4 个）。脚本现已合并执行两部分。回归通过：原 HEVC RFF 的 40 个成功输出与 6 个负向检查、H.264 RFF 的 12 个输出；扩展 remux 测试工具后另重验原 HEVC B 帧 RFF 标记关联。

@@ -63,7 +63,7 @@ using Frame = DecodedFrame;
 
 class HardwareDecoder {
 public:
-    HardwareDecoder(CMFormatDescriptionRef format, bool allow_interlaced) try : format_(hardware_decode_format(format)) {
+    HardwareDecoder(CMFormatDescriptionRef format, bool allow_interlaced, bool pair_fields) try : format_(hardware_decode_format(format)) {
         const auto codec = CMFormatDescriptionGetMediaSubType(format);
         if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != 0x68657631U && codec != kCMVideoCodecType_AV1) {
             throw std::runtime_error("Native hardware decoder supports H.264, HEVC and AV1 only");
@@ -74,6 +74,7 @@ public:
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
         bool interlaced_coding = false;
         const auto pixel_format = static_cast<std::int32_t>(source_pixel_format(format, allow_interlaced, &interlaced_coding));
+        packed_fields_ = pair_fields && interlaced_coding && codec != kCMVideoCodecType_H264;
         CFRef pixel_number(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pixel_format));
         CFRef surface(CFDictionaryCreate(kCFAllocatorDefault, nullptr, nullptr, 0,
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
@@ -90,7 +91,9 @@ public:
         try {
             // Progressive-coded rasters can contain woven fields when explicitly
             // overridden by the user; no decoder field handling applies to those.
-            if (allow_interlaced && interlaced_coding) {
+            // HEVC field pictures must remain one packed raster per sample.
+            // H.264 PAFF/MBAFF continues to request woven decoder output.
+            if (allow_interlaced && interlaced_coding && !packed_fields_) {
                 check_status(VTSessionSetProperty(session_, kVTDecompressionPropertyKey_FieldMode,
                     kVTDecompressionProperty_FieldMode_BothFields), "Set decoder FieldMode=BothFields [Metal deinterlacing requires woven fields]");
                 CFTypeRef raw_mode = nullptr;
@@ -161,6 +164,12 @@ private:
             self.called_ = true;
             if (self.suppressed_) return;
             if (!image || (flags & kVTDecodeInfo_FrameDropped)) throw std::runtime_error("Hardware decoder dropped a display frame");
+            if (self.packed_fields_) {
+                const auto size = CMVideoFormatDescriptionGetDimensions(self.format_.get());
+                if (CVPixelBufferGetWidth(image) != static_cast<std::size_t>(size.width) ||
+                    CVPixelBufferGetHeight(image) != static_cast<std::size_t>(size.height))
+                    throw std::runtime_error("Hardware HEVC decoder did not preserve the packed single-field raster");
+            }
             require_time(pts, "decoded PTS");
             CFRetain(image);
             self.frame_.emplace(Frame{CFRef(image), pts, duration});
@@ -172,12 +181,13 @@ private:
     std::exception_ptr error_;
     bool called_ = false;
     bool suppressed_ = false;
+    bool packed_fields_ = false;
 };
 
 class DisplayFrames final : public DecodedFrames {
 public:
     DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled, bool allow_interlaced, bool read_cadence)
-        : input_(input), cancelled_(cancelled), decoder_(input.hardware_video_format(), allow_interlaced), read_cadence_(read_cadence) {}
+        : input_(input), cancelled_(cancelled), decoder_(input.hardware_video_format(), allow_interlaced, read_cadence), read_cadence_(read_cadence) {}
     std::unique_ptr<Frame> next() override {
         while (!cancelled_) {
             if (!frames_.empty() && (eof_ || frames_.size() >= 32)) {
@@ -231,7 +241,8 @@ public:
         validate_source(input.info().video_format, config_.filter.bob || config_.filter.ivtc.enabled, config_.filter.colorspace.enabled);
         if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input, cancelled);
         else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob || config_.filter.ivtc.enabled,
-            config_.filter.ivtc.enabled && (config_.filter.ivtc.expand != RffExpansion::off || config_.filter.ivtc.mixed));
+            config_.filter.ivtc.enabled && (input.video_parameters()->codec_id == AV_CODEC_ID_HEVC ||
+                config_.filter.ivtc.expand != RffExpansion::off || config_.filter.ivtc.mixed));
         if (config_.filter.ivtc.enabled) frames_ = std::make_unique<IvtcFrames>(std::move(frames_), input.info().video_format, config_.filter, cancelled);
         current_ = frames_->next();
         if (!current_) {
@@ -239,19 +250,27 @@ public:
             return;
         }
         auto pixel = current_->pixel.get();
-        const auto dimensions = CMVideoFormatDescriptionGetDimensions(input_.info().video_format);
+        std::optional<CFRef<CMVideoFormatDescriptionRef>> assembled_format;
+        auto source_format = input_.info().video_format;
+        if (config_.filter.ivtc.enabled) {
+            CMVideoFormatDescriptionRef raw = nullptr;
+            check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixel, &raw), "Describe IVTC display raster");
+            assembled_format.emplace(raw);
+            source_format = raw;
+        }
+        const auto dimensions = CMVideoFormatDescriptionGetDimensions(source_format);
         config_.video.width = dimensions.width;
         config_.video.height = dimensions.height;
         std::optional<CFRef<CMVideoFormatDescriptionRef>> encoder_input_format;
         if (needs_gpu_filter(config_, pixel)) {
-            filter_ = std::make_unique<GpuFilter>(make_filter_plan(config_, input_.info().video_format, pixel));
+            filter_ = std::make_unique<GpuFilter>(make_filter_plan(config_, source_format, pixel));
             if (config_.filter.bob) first_field_ = bob_first_field(config_.filter.field_order, input_.info().video_format, pixel);
             filtered_.emplace(filter_->process(pixel, config_.filter.bob ? static_cast<int>(first_field_) : -1));
             pixel = filtered_->get();
             config_.video.width = static_cast<int>(CVPixelBufferGetWidth(pixel));
             config_.video.height = static_cast<int>(CVPixelBufferGetHeight(pixel));
         }
-        if (filter_ || config_.decode == DecodeMode::software) {
+        if (filter_ || config_.decode == DecodeMode::software || config_.filter.ivtc.enabled) {
             CMVideoFormatDescriptionRef raw = nullptr;
             check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixel, &raw), "Describe encoder input frame");
             encoder_input_format.emplace(raw);

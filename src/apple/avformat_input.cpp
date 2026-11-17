@@ -254,7 +254,7 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
     if (av_packet_side_data_get(p->coded_side_data, p->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF)) {
         throw std::runtime_error("Dolby Vision input is not supported by the SDR pipeline");
     }
-    s.require_cadence = config.filter.ivtc.enabled && (config.filter.ivtc.expand != RffExpansion::off || config.filter.ivtc.mixed);
+    s.require_cadence = config.filter.ivtc.enabled;
     s.info.video_timescale = stream->time_base.den;
     const auto start = stream->start_time == AV_NOPTS_VALUE ? kCMTimeInvalid : media_time(stream->start_time, stream->time_base, "video start");
     const auto duration = stream->duration == AV_NOPTS_VALUE ? kCMTimeInvalid : media_time(stream->duration, stream->time_base, "video duration");

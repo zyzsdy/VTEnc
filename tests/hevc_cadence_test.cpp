@@ -89,6 +89,17 @@ int main() try {
             ++cases;
         }
     }
+    for(unsigned length:{0U,1U,2U,3U,4U}) for(bool complex:{false,true}) {
+        const auto sequence=sps(0,true,complex,true);
+        HevcCadenceParser fields(length ? hvcc(length,sequence):packet({sequence,pps()}));
+        for(unsigned pic:{1U,2U,9U,10U,11U,12U}) for(bool duplicate:{false,true}) {
+            const auto value=fields.parse(packet({sei(pic,2,duplicate),slice()},length));
+            require(value.known && value.single_field && value.interlaced,"Missing HEVC field picture");
+            require(value.first==((pic & 1) ? FieldOrder::tff:FieldOrder::bff),"Wrong spatial field parity");
+            require(value.pairing==(pic>=11 ? FieldPairing::next:pic>=9 ? FieldPairing::previous:FieldPairing::unspecified),"Wrong field pairing hint");
+            require(value.repeat_fields==0 && value.duplicate==duplicate,"Coded field duplicate expanded as RFF"); ++cases;
+        }
+    }
     auto check_error=[&](const Data& extra,const Data& access) {
         bool failed=false;
         try { HevcCadenceParser parser(extra); (void)parser.parse(access); } catch(const std::runtime_error&) { failed=true; }

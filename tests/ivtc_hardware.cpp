@@ -25,7 +25,7 @@ Image pattern(int seed, int depth) {
 CFRef<CVPixelBufferRef> upload(const Image& image, int depth, bool full = false) {
     const auto type = depth == 10 ? (full ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
                                   : (full ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
-    auto pool = make_metal_pixel_pool(width, height, type);
+    auto pool = make_metal_pixel_pool(width, static_cast<int>(image[0].size() / width), type);
     CVPixelBufferRef raw = nullptr;
     check_status(CVPixelBufferPoolCreatePixelBuffer(nullptr, pool.get(), &raw), "Create IVTC fixture");
     CFRef output(raw);
@@ -323,6 +323,112 @@ int rff_tests() {
     return cases;
 }
 
+Image packed(const Image& input, unsigned parity) {
+    Image result;
+    for (std::size_t p=0;p<2;++p)
+        for (std::size_t row=parity;row<input[p].size()/width;row+=2)
+            result[p].insert(result[p].end(),input[p].begin()+static_cast<std::ptrdiff_t>(row*width),
+                            input[p].begin()+static_cast<std::ptrdiff_t>((row+1)*width));
+    return result;
+}
+class FieldPictures final : public DecodedFrames {
+public:
+    int count=40, index=0, depth=8;
+    unsigned first=0;
+    bool hints=true, trailing_hints=false, vfr=false, broken=false, cut_in=false, omit_duration=false;
+    CMTime pts=CMTimeMake(1,5);
+    std::unique_ptr<DecodedFrame> next() override {
+        if(index==count) return nullptr;
+        const auto identity=[](int i) { constexpr int ids[]={0,0,0,1,1,2,2,2,3,3}; return i/10*4+ids[i%10]; };
+        const auto n=index+(cut_in ? 2:0);
+        const auto parity=first ^ static_cast<unsigned>(broken ? index/3%2 : index%2);
+        FrameCadence cadence{true,true,0,parity ? FieldOrder::bff:FieldOrder::tff};
+        cadence.single_field=true;
+        if(hints) cadence.pairing=n>0 && identity(n)==identity(n-1) ? FieldPairing::previous:
+            identity(n)==identity(n+1) ? FieldPairing::next:FieldPairing::unspecified;
+        if(trailing_hints && index%2==0) cadence.pairing=FieldPairing::unspecified;
+        cadence.duplicate=n>=2 && identity(n)==identity(n-2);
+        auto pixel=upload(packed(film(identity(n),depth),parity),depth);
+        const auto duration=CMTimeMake(vfr ? 900+index%4*101 : 1001,60000);
+        auto output=std::make_unique<DecodedFrame>(DecodedFrame{std::move(pixel),pts,
+            omit_duration && index==count-1 ? kCMTimeInvalid:duration,cadence});
+        pts=CMTimeAdd(pts,duration); ++index; return output;
+    }
+};
+int field_tests() {
+    int cases=0;
+    for(int depth:{8,10}) for(bool full:{false,true}) for(unsigned first:{0U,1U}) {
+        const auto a=pattern(0,depth), b=pattern(1,depth);
+        auto pa=upload(packed(a,first),depth,full), pb=upload(packed(b,first^1),depth,full);
+        GpuFieldPair gpu(pa.get());
+        auto output=gpu.process(pa.get(),pb.get(),first);
+        auto expected=a;
+        for(int p=0;p<2;++p) for(int y=0;y<height/(p+1);++y) if((static_cast<unsigned>(y)&1U)!=first)
+            std::copy_n(b[static_cast<std::size_t>(p)].begin()+y*width,width,expected[static_cast<std::size_t>(p)].begin()+y*width);
+        require(download(output.get(),depth)==expected,"Packed field Y/UV weave differs from original rows"); ++cases;
+        auto orphan=gpu.process(pa.get(),nullptr,first);
+        auto field=packed(a,first); expected=a;
+        for(int p=0;p<2;++p) for(int y=0;y<height/(p+1);++y) if((static_cast<unsigned>(y)&1U)!=first) {
+            const int above=static_cast<int>(first) ? y/2-1:y/2;
+            const int rows=height/(p+1)/2;
+            for(int x=0;x<width;++x) expected[static_cast<std::size_t>(p)][static_cast<std::size_t>(y*width+x)]=
+                (field[static_cast<std::size_t>(p)][static_cast<std::size_t>(std::clamp(above,0,rows-1)*width+x)]+
+                 field[static_cast<std::size_t>(p)][static_cast<std::size_t>(std::clamp(above+1,0,rows-1)*width+x)]+1)/2;
+        }
+        require(download(orphan.get(),depth)==expected,"Orphan field interpolation differs from scalar result"); ++cases;
+    }
+    auto fixture=upload(film(0,8),8); CMVideoFormatDescriptionRef raw=nullptr;
+    check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr,fixture.get(),&raw),"Describe field fixture"); CFRef format(raw);
+    volatile std::sig_atomic_t cancelled=0;
+    for(int depth:{8,10}) for(unsigned first:{0U,1U}) for(bool hints:{false,true}) for(bool expand:{false,true}) {
+        auto source=std::make_unique<FieldPictures>(); source->depth=depth; source->first=first; source->hints=hints;
+        FilterConfig config; config.ivtc.enabled=true; config.ivtc.mixed=true;
+        config.ivtc.expand=expand ? RffExpansion::on:RffExpansion::off;
+        // User's temporal-order override must not reinterpret HEVC spatial parity.
+        config.field_order=first ? FieldOrder::tff:FieldOrder::bff;
+        IvtcFrames frames(std::move(source),format.get(),config,cancelled);
+        int count=0;
+        while(auto frame=frames.next()) {
+            require(download(frame->pixel.get(),depth)==film(count,depth),"Single-field IVTC lost a film exposure");
+            require(CMTimeCompare(frame->pts,CMTimeAdd(CMTimeMake(1,5),CMTimeMake(count*1001,24000)))==0,"Single-field IVTC PTS drift");
+            require(CMTimeCompare(frame->duration,CMTimeMake(1001,24000))==0,"Single-field IVTC duration drift"); ++count;
+        }
+        require(count==16,"Duplicate single fields were expanded twice or not decimated"); ++cases;
+    }
+    for(int count=1;count<=13;++count) for(bool broken:{false,true}) for(bool cut:{false,true}) {
+        auto source=std::make_unique<FieldPictures>(); auto* input=source.get();
+        source->count=count; source->vfr=true; source->broken=broken; source->cut_in=cut; source->hints=!broken;
+        FilterConfig config; config.ivtc.enabled=true; config.ivtc.mixed=!broken; config.ivtc.cycle=0;
+        IvtcFrames frames(std::move(source),format.get(),config,cancelled);
+        CMTime end=CMTimeMake(1,5); int emitted=0;
+        while(auto frame=frames.next()) {
+            require(CMTimeCompare(frame->pts,end)==0,"Single-field VFR gap/overlap");
+            require(CVPixelBufferGetHeight(frame->pixel.get())==height,"Orphan field did not restore full height");
+            end=CMTimeAdd(end,frame->duration); ++emitted;
+        }
+        require(CMTimeCompare(end,input->pts)==0,"Single-field tail lost time");
+        require(emitted>0,"Single-field stream yielded no images"); ++cases;
+    }
+    for(unsigned first:{0U,1U}) {
+        auto source=std::make_unique<FieldPictures>(); source->count=10; source->first=first; source->trailing_hints=true;
+        FilterConfig config; config.ivtc.enabled=true;
+        FieldFrames paired(std::move(source),config,cancelled);
+        constexpr FieldPairing hints[]={FieldPairing::next,FieldPairing::unspecified,FieldPairing::previous,FieldPairing::previous,FieldPairing::next};
+        int count=0;
+        while(auto frame=paired.next()) {
+            require(count<5 && frame->cadence.pairing==hints[count],"Complementary field pairing hint was discarded"); ++count;
+        }
+        require(count==5,"Complementary hint changed field intervals"); ++cases;
+    }
+    auto source=std::make_unique<FieldPictures>(); source->count=1; source->omit_duration=true;
+    FilterConfig config; config.ivtc.enabled=true;
+    FieldFrames frames(std::move(source),config,cancelled);
+    bool rejected=false;
+    try { (void)frames.next(); } catch(const std::runtime_error&) { rejected=true; }
+    require(rejected,"Missing single-field tail duration was guessed"); ++cases;
+    return cases;
+}
+
 }
 int main() try {
     int cases=0;
@@ -386,5 +492,6 @@ int main() try {
         require(CMTimeCompare(end,input->pts_)==0,"IVTC changed VFR end time"); ++cases;
     }
     cases += rff_tests();
+    cases += field_tests();
     std::cout << "Metal IVTC: " << cases << " reconstruction, cadence and timeline cases passed\n";
 } catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }

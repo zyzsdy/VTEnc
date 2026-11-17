@@ -166,14 +166,16 @@ Sps read_sps(Bytes nal) {
     return s;
 }
 FrameCadence timing(const Sps& s, const std::optional<std::vector<std::uint8_t>>& payload) {
-    if (s.field_sequence) invalid("separately coded fields are unsupported; IVTC requires complete frame rasters");
     FrameCadence result; result.known=true;
     result.interlaced=s.interlaced && !s.progressive;
     if (!s.field_info) return result;
     if (!payload) invalid("SPS requires picture-timing SEI for every picture");
     Bits b(*payload);
-    const auto pic=b.read(4), scan=b.read(2); (void)b.read(1); // duplicate_flag is not repeat_first_field
+    const auto pic=b.read(4), scan=b.read(2); result.duplicate=b.read(1);
     if (scan==3) invalid("reserved source_scan_type");
+    if (pic>12) invalid("reserved pic_struct");
+    result.single_field=pic==1 || pic==2 || pic>=9;
+    if (result.single_field!=s.field_sequence) invalid("pic_struct contradicts SPS field_seq_flag");
     result.interlaced=scan==0;
     switch (pic) {
     case 0: break;
@@ -186,7 +188,10 @@ FrameCadence timing(const Sps& s, const std::optional<std::vector<std::uint8_t>>
     case 7: result.repeat_fields=2; break;
     case 8: result.repeat_fields=4; break;
     case 1: case 2: case 9: case 10: case 11: case 12:
-        invalid("single-field pic_struct is unsupported; IVTC requires complete frame rasters");
+        result.interlaced=true;
+        result.first=(pic & 1) ? FieldOrder::tff:FieldOrder::bff;
+        result.pairing=pic>=11 ? FieldPairing::next:pic>=9 ? FieldPairing::previous:FieldPairing::unspecified;
+        break;
     default: invalid("reserved pic_struct");
     }
     return result;

@@ -83,6 +83,10 @@ struct RffFrames::Impl {
         if (repeat && config.ivtc.expand == RffExpansion::off) {
             if (!config.ivtc.mixed) throw std::runtime_error("RFF input with expand=off requires mixed=true to preserve coded-picture intervals");
         }
+        if (current->cadence.boundary) {
+            flush_pending("source boundary");
+            next_boundary = true;
+        }
         const bool expanding = config.ivtc.expand != RffExpansion::off && (repeat || pending);
         if (expanding) {
             unsigned first = 0;

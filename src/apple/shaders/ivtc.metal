@@ -2,10 +2,26 @@
 // Full license and pinned upstream revision: THIRD_PARTY_NOTICES.md.
 #include <metal_stdlib>
 using namespace metal;
+struct FieldPairParameters { uint parity, orphan, depth; };
 struct IvtcParameters { uint first, match, repair, nt, threshold, combpel, dthresh, depth; };
 int2 ivtc_read(texture2d<float, access::read> t, int x, int y, uint depth) {
     const uint2 xy(uint(clamp(x, 0, int(t.get_width()) - 1)), uint(clamp(y, 0, int(t.get_height()) - 1)));
     return int2(round(t.read(xy).rg * (depth == 10 ? 65535.0f / 64.0f : 255.0f)));
+}
+// Each texture is a packed field, including its own half-height UV plane.
+kernel void hevc_field_pair(texture2d<float, access::read> first [[texture(0)]],
+    texture2d<float, access::read> second [[texture(1)]], texture2d<float, access::write> dst [[texture(2)]],
+    constant FieldPairParameters& p [[buffer(0)]], uint2 xy [[thread_position_in_grid]]) {
+    if (xy.x >= dst.get_width() || xy.y >= dst.get_height()) return;
+    const int x = int(xy.x), y = int(xy.y / 2);
+    int2 value;
+    if ((xy.y & 1) == p.parity) value = ivtc_read(first, x, y, p.depth);
+    else if (!p.orphan) value = ivtc_read(second, x, y, p.depth);
+    else {
+        const int above = p.parity ? y - 1 : y;
+        value = (ivtc_read(first, x, above, p.depth) + ivtc_read(first, x, above + 1, p.depth) + 1) >> 1;
+    }
+    dst.write(float4(float2(value) * (p.depth == 10 ? 64.0f / 65535.0f : 1.0f / 255.0f), 0, 1), xy);
 }
 int2 ivtc_pixel(texture2d<float, access::read> prev, texture2d<float, access::read> cur,
     texture2d<float, access::read> next, int x, int y, constant IvtcParameters& p, uint match) {

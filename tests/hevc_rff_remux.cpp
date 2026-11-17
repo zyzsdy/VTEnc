@@ -1,4 +1,4 @@
-// Test-only remuxer: inject RFF into existing B-frame HEVC without video encoding.
+// Test-only remuxer: inject RFF/field timing into existing B-frame HEVC without video encoding.
 #include "ffmpeg_utils.hpp"
 #include <algorithm>
 #include <filesystem>
@@ -15,10 +15,21 @@ struct IO {
     AVFormatContext* output=nullptr;
     ~IO() { avformat_close_input(&input); if(output) { if(output->pb) avio_closep(&output->pb); avformat_free_context(output); } }
 };
-Data patch_sps(Bytes nal,std::size_t bit) {
+Data patch_parameter(Bytes nal,std::size_t bit,bool fields) {
     Data raw; unsigned zeros=0;
     for(auto byte:nal) { if(zeros==2 && byte==3) { zeros=0; continue; } raw.push_back(byte); zeros=byte==0 ? zeros+1:0; }
-    require(bit<raw.size()*8,"SPS bit offset outside NAL"); raw[bit/8]|=static_cast<std::uint8_t>(1U<<(7-bit%8));
+    const auto set=[&](std::size_t position,bool value) {
+        require(position<raw.size()*8,"Parameter bit offset outside NAL");
+        const auto mask=static_cast<std::uint8_t>(1U<<(7-position%8));
+        if(value) raw[position/8]|=mask; else raw[position/8]&=static_cast<std::uint8_t>(~mask);
+    };
+    const auto type=(nal[0]>>1)&63;
+    if(type==33) { set(bit,true); if(fields) { require(bit>0,"Missing field_seq bit"); set(bit-1,true); } }
+    if(fields) {
+        // NAL header + fixed SPS/VPS syntax before general_profile_tier_level.
+        const unsigned ptl=type==33 ? 24U:48U;
+        set(ptl+40,true); set(ptl+41,true); set(ptl+43,false);
+    }
     Data result; zeros=0;
     for(auto byte:raw) { if(zeros==2 && byte<=3) { result.push_back(3); zeros=0; } result.push_back(byte); zeros=byte==0 ? zeros+1:0; }
     return result;
@@ -28,22 +39,24 @@ void append(Data& out,Bytes bytes,unsigned length) {
     for(unsigned i=length;i>0;--i) out.push_back(static_cast<std::uint8_t>(bytes.size()>>((i-1)*8)));
     out.insert(out.end(),bytes.begin(),bytes.end());
 }
-Data patch_config(Bytes extra,std::size_t bit) {
+Data patch_config(Bytes extra,std::size_t bit,bool fields) {
     require(extra.size()>=23 && extra[0]==1,"Expected hvcC fixture source"); Data out(extra.begin(),extra.begin()+23);
+    if(fields) out[6]=static_cast<std::uint8_t>((out[6]|0xc0U)&~0x10U);
     const auto arrays=extra[22]; auto tail=extra.subspan(23);
     for(unsigned i=0;i<arrays;++i) {
         require(!tail.empty(),"Truncated hvcC header"); out.push_back(tail[0]); tail=tail.subspan(1);
         const auto count=u16(tail); out.push_back(static_cast<std::uint8_t>(count>>8)); out.push_back(static_cast<std::uint8_t>(count));
         for(unsigned j=0;j<count;++j) {
             const auto n=u16(tail); require(n<=tail.size(),"Truncated parameter set"); const auto nal=tail.first(n); tail=tail.subspan(n);
-            if(((nal[0]>>1)&63)==33) append(out,patch_sps(nal,bit),2); else append(out,nal,2);
+            if(((nal[0]>>1)&63)==33 || (fields && ((nal[0]>>1)&63)==32)) append(out,patch_parameter(nal,bit,fields),2); else append(out,nal,2);
         }
     }
     require(tail.empty(),"Extra hvcC data"); return out;
 }
 }
 int main(int argc,char** argv) try {
-    require(argc==4,"Usage: vtenc_hevc_rff_remux input.mp4 output.mp4 SPS-field-info-bit");
+    require(argc==4 || (argc==5 && std::string(argv[4])=="--fields"),"Usage: vtenc_hevc_rff_remux input.mp4 output.mp4 SPS-field-info-bit [--fields]");
+    const bool fields=argc==5;
     require(!std::filesystem::exists(argv[2]),"Output already exists");
     const auto bit=static_cast<std::size_t>(std::stoul(argv[3])); IO io;
     av_check(avformat_open_input(&io.input,argv[1],nullptr,nullptr),"Open B-frame fixture");
@@ -65,7 +78,7 @@ int main(int argc,char** argv) try {
         av_check(avcodec_parameters_copy(stream->codecpar,io.input->streams[i]->codecpar),"Copy fixture stream");
         stream->codecpar->codec_tag=0; stream->time_base=io.input->streams[i]->time_base;
         if(static_cast<int>(i)==video) {
-            const auto extra=patch_config({codec->extradata,static_cast<std::size_t>(codec->extradata_size)},bit);
+            const auto extra=patch_config({codec->extradata,static_cast<std::size_t>(codec->extradata_size)},bit,fields);
             av_freep(&stream->codecpar->extradata);
             stream->codecpar->extradata=static_cast<std::uint8_t*>(av_mallocz(extra.size()+AV_INPUT_BUFFER_PADDING_SIZE));
             if(!stream->codecpar->extradata) throw std::bad_alloc();
@@ -78,7 +91,7 @@ int main(int argc,char** argv) try {
         auto packet=make_packet(); av_check(av_packet_ref(packet.get(),original.get()),"Reference fixture packet");
         if(packet->stream_index==video) {
             const auto rank=static_cast<std::size_t>(std::lower_bound(pts.begin(),pts.end(),packet->pts)-pts.begin());
-            constexpr unsigned cadence[]={5,4,6,3}; const auto pic=rank<pts.size()/4*4 ? cadence[rank%4]:0U;
+            constexpr unsigned cadence[]={5,4,6,3}; const auto pic=fields ? (rank%2 ? 10U:11U):(rank<pts.size()/4*4 ? cadence[rank%4]:0U);
             const Data sei{78,1,1,1,static_cast<std::uint8_t>((pic<<4)|5),128};
             Bytes tail(packet->data,static_cast<std::size_t>(packet->size)); Data data; bool inserted=false;
             while(!tail.empty()) {
@@ -89,7 +102,7 @@ int main(int argc,char** argv) try {
                 if(type<32 && !inserted) { append(data,sei,length); inserted=true; }
                 // Remove prior prefix SEI (test fixture only); slice bytes remain unchanged.
                 if(type==39) continue;
-                if(type==33) append(data,patch_sps(nal,bit),length); else append(data,nal,length);
+                if(type==33 || (fields && type==32)) append(data,patch_parameter(nal,bit,fields),length); else append(data,nal,length);
             }
             require(inserted,"Fixture packet has no slices"); auto updated=make_packet();
             av_check(av_new_packet(updated.get(),static_cast<int>(data.size())),"Allocate injected packet");

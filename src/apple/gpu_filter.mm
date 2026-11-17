@@ -279,4 +279,125 @@ CFRef<CVPixelBufferRef> GpuIvtc::synthesize(CVPixelBufferRef prev, CVPixelBuffer
         return output;
     }
 }
+
+struct GpuFieldPair::Impl {
+    int width, height;
+    OSType format;
+    unsigned depth;
+    CFRef<CVPixelBufferPoolRef> pool;
+    std::optional<CFRef<CFDictionaryRef>> metadata;
+    std::optional<CFRef<CVMetalTextureCacheRef>> cache;
+    id<MTLDevice> device;
+    id<MTLCommandQueue> queue;
+    id<MTLComputePipelineState> pipeline;
+    explicit Impl(CVPixelBufferRef source)
+        : width(static_cast<int>(CVPixelBufferGetWidth(source))), height(static_cast<int>(CVPixelBufferGetHeight(source))),
+          format(CVPixelBufferGetPixelFormatType(source)), pool(make_metal_pixel_pool(width, height * 2, format)) {
+        if (width <= 0 || width % 2 || height < 4 || height % 2 || CVPixelBufferGetPlaneCount(source) != 2)
+            throw std::runtime_error("HEVC field pairing requires even NV12/P010 field dimensions and height >= 4");
+        switch (format) {
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
+        case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange: depth = 8; break;
+        case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange:
+        case kCVPixelFormatType_420YpCbCr10BiPlanarFullRange: depth = 10; break;
+        default: throw std::runtime_error("HEVC field pairing requires NV12/P010");
+        }
+        if (auto raw = CVBufferCopyAttachments(source, kCVAttachmentMode_ShouldPropagate)) metadata.emplace(raw);
+    }
+    void validate(CVPixelBufferRef pixel) const {
+        if (CVPixelBufferGetWidth(pixel) != static_cast<std::size_t>(width) ||
+            CVPixelBufferGetHeight(pixel) != static_cast<std::size_t>(height) ||
+            CVPixelBufferGetPixelFormatType(pixel) != format || CVPixelBufferGetPlaneCount(pixel) != 2)
+            throw std::runtime_error("HEVC single-field pixel layout changed during pairing");
+        for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey,
+             kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey,
+             kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferPixelAspectRatioKey, kCVImageBufferCleanApertureKey}) {
+            const auto expected = metadata ? CFDictionaryGetValue(metadata->get(), key) : nullptr;
+            auto raw = CVBufferCopyAttachment(pixel, key, nullptr);
+            if (raw) {
+                CFRef actual(raw);
+                if (!expected || !CFEqual(expected, actual.get())) throw std::runtime_error("HEVC field color/geometry changed during pairing");
+            } else if (expected) throw std::runtime_error("HEVC field color/geometry disappeared during pairing");
+        }
+    }
+};
+GpuFieldPair::GpuFieldPair(CVPixelBufferRef source) : impl_(std::make_unique<Impl>(source)) {
+    @autoreleasepool {
+        auto& s = *impl_;
+        s.device = MTLCreateSystemDefaultDevice();
+        if (!s.device) metal_error("Create HEVC field Metal device", nil);
+        s.queue = [s.device newCommandQueue];
+        if (!s.queue) metal_error("Create HEVC field command queue", nil);
+        NSError* error = nil;
+        MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
+        options.languageVersion = MTLLanguageVersion2_4; options.fastMathEnabled = NO;
+        auto library = [s.device newLibraryWithSource:[NSString stringWithUTF8String:filter_shader_source] options:options error:&error];
+        if (!library) metal_error("Compile HEVC field shader", error);
+        auto function = [library newFunctionWithName:@"hevc_field_pair"];
+        if (!function) metal_error("Load HEVC field kernel", nil);
+        s.pipeline = [s.device newComputePipelineStateWithFunction:function error:&error];
+        if (!s.pipeline) metal_error("Create HEVC field pipeline", error);
+        CVMetalTextureCacheRef raw = nullptr;
+        check_status(CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, s.device, nullptr, &raw), "Create HEVC field texture cache");
+        s.cache.emplace(raw);
+    }
+}
+GpuFieldPair::~GpuFieldPair() = default;
+CFRef<CVPixelBufferRef> GpuFieldPair::process(CVPixelBufferRef first, CVPixelBufferRef second, unsigned parity) {
+    @autoreleasepool {
+        auto& s = *impl_;
+        if (parity > 1) throw std::runtime_error("Invalid HEVC spatial field parity");
+        s.validate(first); if (second) s.validate(second);
+        const int limit = 10;
+        CFRef number(CFNumberCreate(nullptr, kCFNumberIntType, &limit));
+        const void* keys[] = {kCVPixelBufferPoolAllocationThresholdKey}; const void* values[] = {number.get()};
+        CFRef options(CFDictionaryCreate(nullptr, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+        CVPixelBufferRef raw = nullptr;
+        check_status(CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nullptr, s.pool.get(), options.get(), &raw), "Allocate bounded HEVC field pair");
+        CFRef output(raw);
+        CVBufferRemoveAllAttachments(raw);
+        if (s.metadata) CVBufferSetAttachments(raw, s.metadata->get(), kCVAttachmentMode_ShouldPropagate);
+        // H.265 E.3.1 SAR already describes the complete frame. Aperture
+        // coordinates, however, describe the decoded half-height picture.
+        if (auto aperture = CVBufferCopyAttachment(first, kCVImageBufferCleanApertureKey, nullptr)) {
+            CFRef original(aperture);
+            if (CFGetTypeID(aperture) != CFDictionaryGetTypeID()) throw std::runtime_error("Invalid HEVC field clean aperture");
+            CFRef adjusted(CFDictionaryCreateMutableCopy(nullptr, 0, static_cast<CFDictionaryRef>(aperture)));
+            for (const auto key : {kCVImageBufferCleanApertureHeightKey, kCVImageBufferCleanApertureVerticalOffsetKey}) {
+                auto value = static_cast<CFNumberRef>(CFDictionaryGetValue(adjusted.get(), key));
+                double n = 0;
+                if (!value || CFGetTypeID(value) != CFNumberGetTypeID() || !CFNumberGetValue(value, kCFNumberDoubleType, &n))
+                    throw std::runtime_error("Invalid HEVC field aperture coordinate");
+                n *= 2;
+                CFRef scaled(CFNumberCreate(nullptr, kCFNumberDoubleType, &n));
+                CFDictionarySetValue(adjusted.get(), key, scaled.get());
+            }
+            CVBufferSetAttachment(raw, kCVImageBufferCleanApertureKey, adjusted.get(), kCVAttachmentMode_ShouldPropagate);
+        }
+        const int count = second ? 2 : 1;
+        CFRef fields(CFNumberCreate(nullptr, kCFNumberIntType, &count));
+        CVBufferSetAttachment(raw, kCVImageBufferFieldCountKey, fields.get(), kCVAttachmentMode_ShouldPropagate);
+        CVBufferRemoveAttachment(raw, kCVImageBufferFieldDetailKey);
+        if (second) CVBufferSetAttachment(raw, kCVImageBufferFieldDetailKey, parity ? kCVImageBufferFieldDetailSpatialFirstLineLate : kCVImageBufferFieldDetailSpatialFirstLineEarly, kCVAttachmentMode_ShouldPropagate);
+        const std::array<unsigned, 3> params{parity, second ? 0U : 1U, s.depth};
+        std::array textures{texture(s.cache->get(), first, 0, false), texture(s.cache->get(), second ? second : first, 0, false), texture(s.cache->get(), raw, 0, true),
+            texture(s.cache->get(), first, 1, false), texture(s.cache->get(), second ? second : first, 1, false), texture(s.cache->get(), raw, 1, true)};
+        auto command = [s.queue commandBuffer];
+        if (!command) metal_error("Create HEVC field command", nil);
+        for (unsigned plane = 0; plane < 2; ++plane) {
+            auto encoder = [command computeCommandEncoder];
+            if (!encoder) metal_error("Create HEVC field encoder", nil);
+            [encoder setComputePipelineState:s.pipeline];
+            [encoder setBytes:params.data() length:sizeof(params) atIndex:0];
+            for (unsigned i = 0; i < 3; ++i) [encoder setTexture:CVMetalTextureGetTexture(textures[plane * 3 + i].get()) atIndex:i];
+            const auto x = s.pipeline.threadExecutionWidth;
+            const auto y = std::min<NSUInteger>(8, s.pipeline.maxTotalThreadsPerThreadgroup / x);
+            [encoder dispatchThreads:MTLSizeMake(CVPixelBufferGetWidthOfPlane(raw, plane), CVPixelBufferGetHeightOfPlane(raw, plane), 1) threadsPerThreadgroup:MTLSizeMake(x, y, 1)];
+            [encoder endEncoding];
+        }
+        [command commit]; [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted) metal_error("Execute HEVC field pairing", command.error);
+        return output;
+    }
+}
 } // namespace vtenc
