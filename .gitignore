@@ -3,3 +3,4 @@
 /compile_commands.json
 .DS_Store
 /tests/__pycache__/
+/scripts/__pycache__/

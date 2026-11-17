@@ -23,11 +23,22 @@
       "name": "release",
       "inherits": "base",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "BUILD_TESTING": "OFF" }
+    },
+    {
+      "name": "distribution",
+      "inherits": "release",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "${sourceDir}/build/distribution/prefix",
+        "CMAKE_BUILD_WITH_INSTALL_RPATH": "OFF",
+        "CMAKE_BUILD_RPATH": "${sourceDir}/build/distribution/prefix/lib",
+        "CMAKE_INSTALL_RPATH": "@executable_path/../lib"
+      }
     }
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "distribution", "configurePreset": "distribution" }
   ],
   "testPresets": [
     { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } }

@@ -1,5 +1,7 @@
 # VTEnc
 
+本项目受到 [NVEnc（rigaya/NVEnc）](https://github.com/rigaya/NVEnc) 的启发，并使用、移植了其中部分代码（色彩转换、IVTC、YADIF 与字幕工作流等）。相关版权、MIT 许可证及具体来源见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+
 面向 Apple Silicon M 系列的原生 VideoToolbox 硬件编码器，借鉴 NVEncC 的 CLI、能力探测和模块划分，使用 C++20 + 少量 Objective-C++。
 
 本仓库独立于 NegativeEncoder；未来通过命令行协议集成。功能范围以截至 M6 的硬件支持为目标，硬编能力以当前系统的真实探测为准。编码始终使用硬件；解码支持显式硬解、FFmpeg 软解，以及硬解失败后一次软解重试。
@@ -8,7 +10,7 @@
 
 已实现 P1 硬编闭环、基于 avformat 的多格式输入转码，以及 P3 GPU 缩放、裁剪、基础色彩转换与 Bob 反交错。现有功能：
 
-- CMake / Ninja 的 Debug、Release 构建与安装目标。
+- CMake / Ninja 的 Debug、Release 构建与安装目标，以及 P9 独立依赖／ARM64 发行打包。
 - 纯 C++ CLI、参数校验，以及独立的 Apple 框架适配库。
 - H.264 8-bit、HEVC 8/10-bit 的硬件会话探测与支持属性枚举。
 - Objective-C++ / ARC 的 Metal 设备查询。
@@ -37,7 +39,8 @@ P4 用法、JSON 字段、Y4M 颜色解释及生产者退出状态约定见 [P4 
 ```bash
 xcode-select --install  # 尚未安装 Xcode Command Line Tools 时执行
 brew install cmake ninja ffmpeg libass freetype
-cd /Users/tedzy/Workspace/VTEnc
+git clone https://github.com/zyzsdy/VTEnc.git
+cd VTEnc
 ./scripts/bootstrap.sh
 ```
 
@@ -55,6 +58,58 @@ source build/tools/bin/activate
 后续终端使用该环境前执行 `source build/tools/bin/activate`。Python 用于安装开发工具及准备测试素材，`vtenc` 本身没有 Python 运行时依赖；`build/` 整体不纳入 Git。
 
 2026-11-16 已在 Apple M6、macOS 27.2.1、Apple Clang 21 / macOS SDK 27.2 上验证 Debug / Release 构建、本地安装和 CLI 检查；H.264 8-bit、HEVC 8-bit / 10-bit 的 1920×1080 硬件会话均成功准备并确认硬件后端。这不是码流质量验证，也不代表其他机型或旧系统已完成验证。
+
+## 编译二进制与分发包
+
+### 本机 Release 二进制
+
+在 Apple Silicon Mac 上准备上述依赖后，从仓库根目录执行：
+
+```bash
+cmake --preset release
+cmake --build --preset release --parallel
+./build/release/vtenc --version
+cmake --install build/release --prefix "$PWD/build/install"
+```
+
+可执行文件为 `build/release/vtenc`，安装后为 `build/install/bin/vtenc`。这是动态链接本机依赖的构建，单独复制该文件到另一台 Mac 不保证能运行。Debug 构建使用 `dev` preset；构建不会自动运行测试。
+
+### 可迁移的 macOS ARM64 发行包
+
+发行构建使用独立依赖前缀，与本机 Homebrew FFmpeg 隔离。需要 Python 3.9+、CMake、Ninja、Meson、pkg-config、Apple Command Line Tools，以及首次下载源码时的网络连接：
+
+```bash
+brew install cmake ninja meson pkgconf
+python3 scripts/build-dependencies.py
+cmake --preset distribution
+cmake --build --preset distribution --parallel
+python3 scripts/package-release.py
+```
+
+依赖版本、来源与 SHA-256 固定在 `scripts/dependencies.json`，源码、编译日志和命令记录都位于 `build/distribution/`。FFmpeg 使用共享库，禁用 GPL、nonfree、version3 组件、所有编码器和外部依赖自动发现；保留 libavformat 探测／封装、libavcodec 解码与 libswresample。视频编码仍只通过系统 VideoToolbox，AAC 编码仍只通过 AudioToolbox。字幕依赖从源码构建，使用 CoreText 系统字体发现，不捆绑字体、Homebrew、FFmpeg CLI 或 Python 运行时。新版 macOS HVF 字体通过 FreeType 的运行时检查和系统 `libhvf` 弱链接支持。
+
+`build/packages/` 生成：
+
+- `vtenc-<版本>-macos-arm64.zip`：`bin/vtenc`、`lib/` 动态库、文档、许可证与 `BUILD-MANIFEST.json`。
+- `vtenc-<版本>-dependency-sources.tar.gz`：该版本对应的未修改依赖源码、构建脚本和命令记录。
+- `vtenc-<版本>-SHA256SUMS.txt`：下载校验值。
+
+解压后执行 `./vtenc-<版本>-macos-arm64/bin/vtenc --help`；必须保留旁边的 `lib/` 目录。可将 `bin/` 加入 PATH，不要只移动 `vtenc`。可用 `shasum -a 256 -c vtenc-<版本>-SHA256SUMS.txt` 校验下载。打包脚本拒绝引用发行依赖目录以外的非系统库，检查所有 Mach-O 为 arm64，并记录每个文件的最低部署版本。依赖构建目标为 macOS 13.0；实际测试的系统与尚未完成的旧系统验收见 [P9 验证](docs/P9验证.md)，不能将加载命令检查当作旧系统实机验证。
+
+### 签名与公证
+
+默认发行包使用 **ad-hoc 签名，未经过 Apple 公证**；下载后的 Gatekeeper 检查可能阻止运行。ad-hoc 仅用于本地代码完整性，不提供开发者身份认证。申请 [Developer ID Application 证书](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/) 并安装到本机钥匙串后，可在打包阶段传入身份；如已有 `notarytool` 钥匙串配置，可同时提交公证：
+
+```bash
+security find-identity -v -p codesigning
+python3 scripts/package-release.py \
+  --identity 'Developer ID Application: YOUR NAME (TEAMID)' \
+  --notary-profile VTEnc-notary
+```
+
+此入口对每个动态库和可执行文件开启 hardened runtime 与安全时间戳，并等待 Apple 返回 `Accepted`；失败直接退出。ZIP 中的 CLI 不支持直接装订 ticket，公证结果单独记录，下载运行仍需系统联网核验；此流程需持有有效证书后另行验证。不要将私钥或公证凭据提交到仓库。打包脚本拒绝覆盖同版本已有目录，重新打包前请先将旧目录移走。
+
+本软件使用 LGPL-2.1-or-later 的 FFmpeg；精确对应源码随每个 [Release](https://github.com/zyzsdy/VTEnc/releases) 的 dependency-sources 资产提供。第三方许可证、FreeType 声明与替换 LGPL 动态库的说明随包附带，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 构建与运行
 

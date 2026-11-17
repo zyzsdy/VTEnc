@@ -150,3 +150,29 @@ FreeType attribution (FTL selection): Portions of this software are copyright
 © 1996–2026 The FreeType Project (https://freetype.org/). All rights reserved.
 The linked font libraries are external dependencies; redistribution must include
 their complete applicable licenses, notices and any required source materials.
+
+## P9 release dependency distribution
+
+Official `macos-arm64` pre-release archives use the pinned source builds in
+`scripts/dependencies.json`, not the Homebrew FFmpeg build described above.
+FFmpeg is built with GPL, version3 and nonfree disabled, all encoders disabled,
+and external library autodetection disabled. Only its shared libavformat,
+libavcodec, libavutil and libswresample closure is bundled. FFmpeg is used under
+LGPL-2.1-or-later; decoding does not alter VTEnc's hardware-only video encoding.
+FriBidi's shared library is LGPL-2.1-or-later; its GPL command-line programs and
+tests are not built or distributed. FreeType uses the FreeType License (FTL).
+HarfBuzz uses its MIT-style license, libass ISC, and libunibreak the zlib license.
+Apple system frameworks and system zlib are supplied by macOS and not bundled.
+
+Full applicable license texts, source URLs, SHA-256 checksums and build recipes
+are included with the binary. The matching `dependency-sources.tar.gz` asset on
+[the same Release](https://github.com/zyzsdy/VTEnc/releases) contains the exact,
+unmodified dependency source archives and build scripts. Dependency sources are
+provided alongside the binary, not merely linked to an upstream download.
+
+Users may replace the LGPL shared libraries with interface-compatible modified
+versions. Reverse engineering for debugging modifications to those libraries is
+permitted. Local modified Mach-O files can be re-signed ad-hoc using `codesign
+--force --sign -`; if a future Developer ID build enforces library validation,
+re-sign the executable and its modified libraries locally as well. Such local
+modifications are not covered by the publisher's original signature or notarization.
