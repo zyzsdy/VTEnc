@@ -2,6 +2,7 @@
 #include "source_format.hpp"
 #include "encoder_session.hpp"
 #include "bob.hpp"
+#include "ivtc.hpp"
 #include <limits>
 
 #include <array>
@@ -86,6 +87,26 @@ int main() {
         rejected = false;
         try { (void)vtenc::bob_time(rounded, CMTimeMake(1, 30), 0); } catch (const std::runtime_error&) { rejected = true; }
         require(rejected, "Rounded Bob origin accepted");
+        require(vtenc::ivtc_timescale(30000) == 120000, "Wrong IVTC mux timescale");
+        for (auto duration : {CMTimeMake(5005, 30000), CMTimeMake(12, 25), CMTimeMake(2, 90)}) {
+            auto quarter = vtenc::ivtc_quarter(duration);
+            require(!CMTIME_HAS_BEEN_ROUNDED(quarter) && CMTimeCompare(CMTimeMultiply(quarter, 4), duration) == 0,
+                    "IVTC cycle split lost precision");
+        }
+        for (auto duration : {kCMTimeInvalid, kCMTimeZero, CMTimeMake(-1, 30), rounded, CMTimeMake(1, std::numeric_limits<int>::max())}) {
+            rejected = false;
+            try { (void)vtenc::ivtc_quarter(duration); } catch (const std::runtime_error&) { rejected = true; }
+            require(rejected, "Invalid IVTC interval accepted");
+        }
+        for (int scale : {0, -1, std::numeric_limits<int>::max() / 4 + 1}) {
+            rejected = false;
+            try { (void)vtenc::ivtc_timescale(scale); } catch (const std::runtime_error&) { rejected = true; }
+            require(rejected, "Overflowing IVTC mux clock accepted");
+        }
+        vtenc::IvtcScores scores{};
+        require(vtenc::ivtc_select(scores) == 0, "IVTC tie must prefer current");
+        scores[0].blocks = 1; scores[1].maximum = 3; scores[2].maximum = 2;
+        require(vtenc::ivtc_select(scores) == 2, "IVTC comb-first selection ignored worst block");
         CVPixelBufferRef raw_pixel = nullptr;
         vtenc::check_status(CVPixelBufferCreate(nullptr, 16, 16, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nullptr, &raw_pixel), "Create field order fixture");
         vtenc::CFRef pixel(raw_pixel);

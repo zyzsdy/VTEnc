@@ -21,6 +21,46 @@ std::int32_t positive_integer(std::string_view value, std::string_view option) {
     }
     return number;
 }
+void parse_ivtc(std::string_view value, IvtcConfig& config) {
+    if (value.empty()) throw std::invalid_argument("Empty --vpp-ivtc parameter");
+    std::set<std::string_view> keys;
+    while (!value.empty()) {
+        const auto comma = value.find(',');
+        const auto pair = value.substr(0, comma);
+        const auto equal = pair.find('=');
+        if (equal == std::string_view::npos) throw std::invalid_argument("--vpp-ivtc requires key=value pairs");
+        const auto key = pair.substr(0, equal), text = pair.substr(equal + 1);
+        if (!keys.insert(key).second) throw std::invalid_argument("Duplicate --vpp-ivtc parameter: " + std::string(key));
+        if (key == "log") {
+            if (text != "true" && text != "false") throw std::invalid_argument("--vpp-ivtc log requires true or false");
+            config.log = text == "true";
+            if (comma == std::string_view::npos) break;
+            value.remove_prefix(comma + 1);
+            if (value.empty()) throw std::invalid_argument("Empty --vpp-ivtc parameter");
+            continue;
+        }
+        int* target = nullptr;
+        if (key == "cycle") target = &config.cycle;
+        else if (key == "post") target = &config.post;
+        else if (key == "nt") target = &config.nt;
+        else if (key == "cthresh") target = &config.cthresh;
+        else if (key == "combpel") target = &config.combpel;
+        else if (key == "dthresh") target = &config.dthresh;
+        else throw std::invalid_argument("Unsupported --vpp-ivtc parameter: " + std::string(key));
+        int number = 0;
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), number);
+        if (error != std::errc{} || end != text.data() + text.size() || number < 0 || number > 255)
+            throw std::invalid_argument("--vpp-ivtc values must be integers in 0..255");
+        *target = number;
+        if (comma == std::string_view::npos) break;
+        value.remove_prefix(comma + 1);
+        if (value.empty()) throw std::invalid_argument("Empty --vpp-ivtc parameter");
+    }
+    if (config.cycle != 0 && config.cycle != 5) throw std::invalid_argument("--vpp-ivtc cycle must be 0 or 5");
+    if (config.post != 0 && config.post != 2) throw std::invalid_argument("--vpp-ivtc post must be 0 or 2");
+    if (config.combpel < 1 || config.combpel > 128) throw std::invalid_argument("--vpp-ivtc combpel must be in 1..128");
+}
+
 }
 
 std::string_view codec_name(Codec codec) {
@@ -66,6 +106,12 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (arg == "--audio-copy" || arg == "--no-audio") {
             result.encode.copy_audio = arg == "--audio-copy";
             encode_options = true;
+            continue;
+        }
+        if (arg == "--vpp-ivtc") {
+            result.encode.filter.ivtc.enabled = true;
+            encode_options = true;
+            if (i + 1 < args.size() && !args[i + 1].starts_with("-")) parse_ivtc(args[++i], result.encode.filter.ivtc);
             continue;
         }
         const bool common = arg == "--codec" || arg == "--output-depth";
@@ -180,8 +226,10 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
     if (seen.contains("--avhw") && seen.contains("--avsw")) {
         throw std::invalid_argument("--avhw and --avsw are mutually exclusive");
     }
-    if (seen.contains("--field-order") && !result.encode.filter.bob) {
-        throw std::invalid_argument("--field-order requires --deinterlace bob");
+    if (result.encode.filter.ivtc.enabled && result.encode.filter.bob)
+        throw std::invalid_argument("--vpp-ivtc and --deinterlace bob are mutually exclusive");
+    if (seen.contains("--field-order") && !result.encode.filter.bob && !result.encode.filter.ivtc.enabled) {
+        throw std::invalid_argument("--field-order requires --deinterlace bob or --vpp-ivtc");
     }
     if (encode_options) {
         if (has_command) throw std::invalid_argument("Encoding options cannot be combined with a query command");
@@ -209,6 +257,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             if (seen.contains("--avhw") || seen.contains("--avsw")) {
                 throw std::invalid_argument("--avhw and --avsw require compressed input (without --input-res)");
             }
+            if (result.encode.filter.ivtc.enabled) throw std::invalid_argument("--vpp-ivtc requires compressed input");
             if (result.encode.filter.requested) throw std::invalid_argument("GPU filters require compressed input");
             if (!seen.contains("--input-res")) throw std::invalid_argument("Encoding requires --input-res WIDTHxHEIGHT");
             if (result.encode.filter.bob) {
@@ -253,7 +302,7 @@ Usage:
         [--output-range limited|full] [--output-matrix bt601|bt709|bt2020nc|smpte240m]
         [--input-matrix bt601|bt709|bt2020nc|smpte240m] [--input-chroma-loc left|center|top-left]
         [--vpp-colorspace KEY=VALUE[,KEY=VALUE]...]
-        [--deinterlace bob] [--field-order auto|tff|bff]
+        [--deinterlace bob | --vpp-ivtc [PARAMS]] [--field-order auto|tff|bff]
         [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
         --frames COUNT [-f FORMAT | --output-format FORMAT] [--codec h264|hevc] [--output-depth 8|10]
@@ -329,8 +378,16 @@ before the Hermite shoulder. Without hdr2sdr, HDR->SDR is clipping-only conversi
 No LUT3D, gamut compression, dithering or antialiasing downscale.
 Out-of-range output clips at quantization; HDR mastering/content-light metadata
 is removed after filtering. RGB and constant-luminance YCbCr are unsupported.
-Interlaced input requires explicit --deinterlace bob (Metal, two outputs
-per input). Auto field order requires unambiguous metadata; tff/bff overrides it.
+--vpp-ivtc performs Metal C/P/N field matching for hard telecine before other
+filters. Parameters: cycle=5 (drop one per five) or 0 (match only), post=2
+(adaptive residual repair) or 0, nt=10, cthresh=4, combpel=8, dthresh=7.
+log=true writes per-frame decisions to stderr (default false).
+Thresholds use 8-bit units; combpel is 1..128, other thresholds 0..255.
+Full cycles retain their original time span; incomplete tails retain all frames.
+Use --field-order tff|bff when metadata is missing or varies. Raw input, RFF
+expansion, mixed-mode routing and other NVEnc IVTC parameters are unsupported.
+Interlaced input requires explicit --vpp-ivtc or --deinterlace bob. Bob produces
+two Metal outputs per input. Auto field order requires unambiguous metadata; tff/bff overrides it.
 Bob requires height and vertical crop margins divisible by four, keeps telecine
 repeated fields, and is not inverse telecine. Software decoding accepts 8/10-bit
 4:2:0 video; other decoded pixel layouts are rejected.

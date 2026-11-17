@@ -62,7 +62,8 @@ struct SoftwareFrames::Impl {
     AVFrame* frame = nullptr;
     bool draining = false;
     bool ended = false;
-    bool bob;
+    bool deinterlace;
+    bool ivtc;
     bool colorspace;
     FieldOrder field_order;
     const MediaInfo& info;
@@ -74,7 +75,7 @@ struct SoftwareFrames::Impl {
     OSType pixel_type = 0;
 
     Impl(ContainerInput& source, const FilterConfig& filter, const volatile std::sig_atomic_t& stop)
-        : input(source), bob(filter.bob), colorspace(filter.colorspace.enabled), field_order(filter.field_order), info(source.info()), cancelled(stop) {}
+        : input(source), deinterlace(filter.bob || filter.ivtc.enabled), ivtc(filter.ivtc.enabled), colorspace(filter.colorspace.enabled), field_order(filter.field_order), info(source.info()), cancelled(stop) {}
     ~Impl() {
         av_frame_free(&frame);
         avcodec_free_context(&decoder);
@@ -124,12 +125,12 @@ struct SoftwareFrames::Impl {
             attach(kCVImageBufferChromaLocationTopFieldKey, chroma);
             attach(kCVImageBufferChromaLocationBottomFieldKey, chroma);
         }
-        // Bob interprets every raster as a field pair. Hard telecine can mix
+        // Bob and IVTC interpret every raster as a field pair. Hard telecine can mix
         // progressive-coded and interlaced-coded frames in that same track.
-        const int fields = bob || (frame->flags & AV_FRAME_FLAG_INTERLACED) ? 2 : 1;
+        const int fields = deinterlace || (frame->flags & AV_FRAME_FLAG_INTERLACED) ? 2 : 1;
         CFRef count(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &fields));
         attach(kCVImageBufferFieldCountKey, count.get());
-        if (bob && field_order != FieldOrder::automatic) {
+        if (deinterlace && field_order != FieldOrder::automatic) {
             // The explicit source interpretation also applies to progressive
             // pictures and mixed field-order flags inside hard telecine streams.
             attach(kCVImageBufferFieldDetailKey, field_order == FieldOrder::tff
@@ -137,7 +138,7 @@ struct SoftwareFrames::Impl {
         } else if (frame->flags & AV_FRAME_FLAG_INTERLACED) {
             attach(kCVImageBufferFieldDetailKey, (frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST)
                 ? kCVImageBufferFieldDetailTemporalTopFirst : kCVImageBufferFieldDetailTemporalBottomFirst);
-        } else if (bob) {
+        } else if (deinterlace) {
             auto detail = CMFormatDescriptionGetExtension(info.video_format, kCMFormatDescriptionExtension_FieldDetail);
             if (detail && CFEqual(detail, kCVImageBufferFieldDetailSpatialFirstLineEarly)) detail = kCVImageBufferFieldDetailTemporalTopFirst;
             if (detail && CFEqual(detail, kCVImageBufferFieldDetailSpatialFirstLineLate)) detail = kCVImageBufferFieldDetailTemporalBottomFirst;
@@ -155,6 +156,8 @@ struct SoftwareFrames::Impl {
         }
     }
     CFRef<CVPixelBufferRef> pixels() {
+        if (ivtc && frame->repeat_pict != 0)
+            throw std::runtime_error("IVTC received repeat-picture metadata (soft telecine); RFF expansion is unsupported");
         if (frame->flags & AV_FRAME_FLAG_CORRUPT || frame->decode_error_flags) {
             throw std::runtime_error("FFmpeg returned a corrupt/concealed decoded frame");
         }
@@ -162,8 +165,8 @@ struct SoftwareFrames::Impl {
             av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA) || av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_RPU_BUFFER)) {
             throw std::runtime_error("HDR requires --vpp-colorspace; Dolby Vision input is not supported");
         }
-        if ((frame->flags & AV_FRAME_FLAG_INTERLACED) && !bob) {
-            throw std::runtime_error("Interlaced video requires --deinterlace bob");
+        if ((frame->flags & AV_FRAME_FLAG_INTERLACED) && !deinterlace) {
+            throw std::runtime_error("Interlaced video requires --deinterlace bob or --vpp-ivtc");
         }
         const auto dimensions = CMVideoFormatDescriptionGetDimensions(info.video_format);
         if (frame->width <= 0 || frame->height <= 0 || frame->width % 2 || frame->height % 2 ||

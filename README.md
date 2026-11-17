@@ -321,7 +321,7 @@ python3 tests/colorspace_hardware.py --tone-mapping
 
 `--deinterlace bob` 对每个输入帧对的两个场分别进行垂直线性重建，按时间先后输出完整尺寸的逐行帧。Y 与 UV 都只从所选场取样；色度位置按各场坐标解释，再转换为逐行 left 色度位置。Bob 可与文件模式的裁剪、缩放和色彩转换组合；源高度和上下裁剪边距必须为 4 的倍数，以保留完整的 4:2:0 场布局。
 
-`--field-order auto|tff|bff` 默认 auto，要求解码缓冲区或格式描述有无歧义的场序；缺失时直接报错。tff/bff 是显式源解释覆盖，也可处理实际包含交错栅格但被标记为逐行编码的文件。它不是场序检测器，选错会颠倒运动时序。不启用 Bob 时继续拒绝已识别的交错输入。
+`--field-order auto|tff|bff` 默认 auto，要求解码缓冲区或格式描述有无歧义的场序；缺失时直接报错。tff/bff 是显式源解释覆盖，也可处理实际包含交错栅格但被标记为逐行编码的文件。它不是场序检测器，选错会颠倒运动时序。不启用 Bob 或 IVTC 时继续拒绝已识别的交错输入。
 
 文件模式精确拆分每帧的显示区间：第一场 PTS 为原 PTS，第二场为原 PTS 加半个 duration，两个输出 duration 相等。保留 VFR 间隔和 A/V 起点，封装视频时间基加倍，不能精确表示时失败。原音轨仍逐包复制。每场 GPU 完成后才提交硬编，保持有界资源与取消清理。
 
@@ -343,7 +343,61 @@ python3 tests/bob_hardware.py --vtenc build/dev/vtenc
 
 **本机限制：**`video_samples/deinterlace` 的普通交错和 3:2 hard telecine 原始 MP4，强制硬解均在创建会话时返回 `OSStatus=-12911`。因此这两个原始文件的完整硬解转码未通过。测试明确将其记为硬解受阻；另将样片离线导出为原始帧，实际验证 Metal Bob 与 VT 硬编，并用明确标注的逐行编码交错栅格载体 / VFR 文件验证硬解、调度和音轨复制。这是原始硬解路径的限制；新增 `--avsw` 与默认回退可直接软解这两个原始样片，再通过 Metal Bob 与 VT 硬编完成转码。原有硬件验证脚本现显式使用 `--avhw`，软解及自动重试由 `decode_modes_hardware.py` 单独验证。
 
-Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/1001p；不实现 IVTC、soft telecine 的重复场展开、场匹配、运动自适应或自动混合模式检测。单场重建会损失垂直细节，细线可能闪烁。真实结果和复现边界见 [Bob 验证记录](docs/P3Bob验证.md)。
+Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/1001p；Bob 本身不做场匹配或去重；还原电影帧请使用下面的 `--vpp-ivtc`。单场重建会损失垂直细节，细线可能闪烁。真实结果和复现边界见 [Bob 验证记录](docs/P3Bob验证.md)。
+
+## Metal IVTC：hard telecine 还原
+
+`--vpp-ivtc` 针对已包含重复场的 **3:2 hard telecine**：在 Metal 上匹配相邻帧的上下场，完整五帧周期丢弃一帧，将典型的 30000/1001 输入还原为 24000/1001 逐行输出。不适用于把普通 60i 视频直接变成电影帧率；普通交错输入仍使用 Bob。
+
+```bash
+./build/dev/vtenc -i telecine.mp4 -o build/film.mp4 \
+  --vpp-ivtc --field-order tff
+
+# 显式软解，硬件编码；同时缩放、输出 HEVC 10-bit
+./build/dev/vtenc -i telecine.mp4 -o build/film10.mp4 --avsw \
+  --vpp-ivtc post=2,nt=10,cthresh=4,combpel=8,dthresh=7 \
+  --field-order tff --output-res 1280x720 --codec hevc --output-depth 10
+
+# 仅场匹配、不丢帧；逐帧诊断写 stderr
+./build/dev/vtenc -i telecine.mp4 -o build/matched.mp4 \
+  --vpp-ivtc cycle=0,post=0,log=true --field-order tff
+```
+
+参数可省略；重复、未知参数和越界数值直接报错。`--field-order auto|tff|bff` 与 Bob 共用，默认 auto 需要明确且一致的元数据。硬 telecine 的逐帧场标记可能变化，此时使用已知的 tff/bff 覆盖；不猜测场序。IVTC 与 Bob 互斥，仅支持 libavformat 压缩输入。
+
+| 参数 | 默认值 | 范围及含义 |
+| --- | --- | --- |
+| `cycle` | 5 | 5：每五帧丢一帧；0：只匹配和修复 |
+| `post` | 2 | 2：修复残留梳齿；0：关闭修复 |
+| `nt` | 10 | 0–255，匹配评分的噪声门限 |
+| `cthresh` | 4 | 0–255，评分的单像素梳齿门限 |
+| `combpel` | 8 | 1–128，每个 32×8 块判为梳齿块所需的像素数 |
+| `dthresh` | 7 | 0–255，修复的像素残差门限；0 关闭此门控 |
+| `log` | false | true/false，输出帧选择、评分、SAD 与周期丢帧位置到 stderr |
+
+`nt`/`cthresh` 按源位深换算后最小为 1 码值（与参考实现一致）；`dthresh=0` 才表示关闭像素门控。
+
+移植参考 [NVEnc IVTC](https://github.com/rigaya/NVEnc/blob/5bb35d860bc5f877b01fe60e4de5ac756b9b80ed/NVEncCore/NVEncFilterIvtc.cu)，MIT 声明保留于 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。处理如下：
+
+- 固定源场序，对 C（当前帧）、P（当前首场＋前帧次场）、N（后帧首场＋当前次场）计算亮度的五行插值误差与梳齿计数。32×8 分块后按梳齿块数量、最大块计数、裁剪均值、匹配误差排序；指标由 GPU 计算，CPU 仅汇总块统计和调度。
+- 保留上游 N→P 重复场对保护，并增加干净 P→N 候选间的连续性约束，避免压缩噪声导致漏掉一个电影时刻。首帧不借未来首场取代片段开头；相邻原始帧亮度 SAD 超过最大可能值的 20% 时禁止跨该边界借场。
+- Y 和交织 UV 在 Metal 上按同一场选择重组；残余梳齿的最大块计数达到 65 时，`post=2` 使用上游三帧时空自适应插值与像素门控。支持 NV12/P010 的 limited/full range，源高度至少 8 且为 4 的倍数。10-bit 按码值缩放门限并保持 P010 高位布局。
+- 对合成帧计算亮度 SAD，每完整五帧周期移除与前一合成帧最相似的一帧，包含跨周期边界比较。初始帧没有前帧，不参与首次最小差值丢帧。静止周期的并列最小值按先后顺序选择。
+
+IVTC 在裁剪、缩放和色彩转换之前执行。每个完整周期按原始首尾时间均分为四个输出，整数有理数计算，保留非零 PTS 起点与周期总时长；CFR 输入得到 4/5 帧率，VFR 保留每周期时长。尾部不足五帧全部输出并保留原区间，避免拉长片尾。封装视频时间基扩大四倍，不能精确表示时明确失败。音轨继续按原时间轴逐包复制。`-o -` 的码流与 stderr 诊断分离；启动 stdout 封装后仍禁止从头重试。
+
+这是上游算法的 **hard-telecine 核心路径移植**，不宣称所有 NVEnc 参数或输出逐位兼容。没有移植 RFF soft-telecine 预扫描/展开、混合模式路由、cadence lock、双场序置信度分类或五帧 BWDIF；这些参数不会被静默接受。软解检测到 repeat-picture 元数据时明确拒绝 IVTC。`cycle=5` 是显式 3:2 假设，不自动识别逐行、PAL 或混合帧率素材；`cycle=0` 可用于不降帧的场匹配。压缩破坏、剪辑打断和真正交错片段中的不可恢复场仍可能需要插值。
+
+显式运行相关验证：
+
+```bash
+ctest --preset dev -R '^vtenc.cli$'
+ctest --preset dev -R '^vtenc.timeline$'
+./build/dev/vtenc_ivtc_test
+python3 tests/ivtc_hardware.py --vtenc build/dev/vtenc
+```
+
+2026-11-17 本机已通过 90 个 IVTC 数值/调度用例和 9 个端到端输出，原始 telecine 的 180→144 帧恢复平均 PSNR 为 43.34 dB；详见 [Metal IVTC 验证记录](docs/MetalIVTC验证.md)。
 
 ## 代码布局
 

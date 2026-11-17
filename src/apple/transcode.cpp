@@ -4,6 +4,7 @@
 #include "source_format.hpp"
 #include "gpu_filter.hpp"
 #include "bob.hpp"
+#include "ivtc.hpp"
 #include "decoded_frames.hpp"
 #include "decode_policy.hpp"
 #include "ffmpeg_utils.hpp"
@@ -31,7 +32,7 @@ bool sample_flag(CMSampleBufferRef sample, CFStringRef key) {
     return value && CFEqual(value, kCFBooleanTrue);
 }
 
-void validate_source(CMFormatDescriptionRef format, bool bob, bool colorspace) {
+void validate_source(CMFormatDescriptionRef format, bool allow_interlaced, bool colorspace) {
     const auto codec = CMFormatDescriptionGetMediaSubType(format);
     if (codec == 0x64766831U || codec == 0x64766865U) throw std::runtime_error("Dolby Vision input is not supported by the P2 SDR pipeline");
     const auto fields = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FieldCount);
@@ -41,7 +42,7 @@ void validate_source(CMFormatDescriptionRef format, bool bob, bool colorspace) {
             throw std::runtime_error("Invalid video field count");
         }
         if (count != 1 && count != 2) throw std::runtime_error("Unsupported video field count");
-        if (count == 2 && !bob) throw std::runtime_error("Interlaced video requires --deinterlace bob");
+        if (count == 2 && !allow_interlaced) throw std::runtime_error("Interlaced video requires --deinterlace bob or --vpp-ivtc");
     }
     const auto transfer = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_TransferFunction);
     if (!colorspace && transfer && (CFEqual(transfer, kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ) ||
@@ -62,7 +63,7 @@ using Frame = DecodedFrame;
 
 class HardwareDecoder {
 public:
-    HardwareDecoder(CMFormatDescriptionRef format, bool bob) try : format_(hardware_decode_format(format)) {
+    HardwareDecoder(CMFormatDescriptionRef format, bool allow_interlaced) try : format_(hardware_decode_format(format)) {
         const auto codec = CMFormatDescriptionGetMediaSubType(format);
         if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != 0x68657631U && codec != kCMVideoCodecType_AV1) {
             throw std::runtime_error("Native hardware decoder supports H.264, HEVC and AV1 only");
@@ -72,7 +73,7 @@ public:
         CFRef specification(CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1,
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
         bool interlaced_coding = false;
-        const auto pixel_format = static_cast<std::int32_t>(source_pixel_format(format, bob, &interlaced_coding));
+        const auto pixel_format = static_cast<std::int32_t>(source_pixel_format(format, allow_interlaced, &interlaced_coding));
         CFRef pixel_number(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pixel_format));
         CFRef surface(CFDictionaryCreate(kCFAllocatorDefault, nullptr, nullptr, 0,
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
@@ -82,16 +83,16 @@ public:
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
         VTDecompressionOutputCallbackRecord callback{&receive, this};
         check_status(VTDecompressionSessionCreate(kCFAllocatorDefault, format_.get(), specification.get(), attributes.get(),
-            &callback, &session_), bob ? "VTDecompressionSessionCreate [hardware required; Bob source; no software fallback]"
+            &callback, &session_), allow_interlaced ? "VTDecompressionSessionCreate [hardware required; woven source; hardware required]"
                                       : "VTDecompressionSessionCreate [hardware required]");
         if (!session_) throw std::runtime_error("No hardware decompression session returned");
         // Guard creation's remaining operations, because a throwing constructor has no destructor.
         try {
             // Progressive-coded rasters can contain woven fields when explicitly
             // overridden by the user; no decoder field handling applies to those.
-            if (bob && interlaced_coding) {
+            if (allow_interlaced && interlaced_coding) {
                 check_status(VTSessionSetProperty(session_, kVTDecompressionPropertyKey_FieldMode,
-                    kVTDecompressionProperty_FieldMode_BothFields), "Set decoder FieldMode=BothFields [Metal Bob requires woven fields]");
+                    kVTDecompressionProperty_FieldMode_BothFields), "Set decoder FieldMode=BothFields [Metal deinterlacing requires woven fields]");
                 CFTypeRef raw_mode = nullptr;
                 check_status(VTSessionCopyProperty(session_, kVTDecompressionPropertyKey_FieldMode, nullptr, &raw_mode), "Read decoder FieldMode");
                 CFRef mode(raw_mode);
@@ -175,8 +176,8 @@ private:
 
 class DisplayFrames final : public DecodedFrames {
 public:
-    DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled, bool bob)
-        : input_(input), cancelled_(cancelled), decoder_(input.hardware_video_format(), bob) {}
+    DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled, bool allow_interlaced)
+        : input_(input), cancelled_(cancelled), decoder_(input.hardware_video_format(), allow_interlaced) {}
     std::unique_ptr<Frame> next() override {
         while (!cancelled_) {
             if (!frames_.empty() && (eof_ || frames_.size() >= 32)) {
@@ -224,9 +225,10 @@ class EncodedVideo {
 public:
     EncodedVideo(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
         : input_(input), config_(std::move(config)), cancelled_(cancelled) {
-        validate_source(input.info().video_format, config_.filter.bob, config_.filter.colorspace.enabled);
+        validate_source(input.info().video_format, config_.filter.bob || config_.filter.ivtc.enabled, config_.filter.colorspace.enabled);
         if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input, cancelled);
-        else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob);
+        else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob || config_.filter.ivtc.enabled);
+        if (config_.filter.ivtc.enabled) frames_ = std::make_unique<IvtcFrames>(std::move(frames_), input.info().video_format, config_.filter, cancelled);
         current_ = frames_->next();
         if (!current_) {
             if (!cancelled_) throw std::runtime_error("Input contains no displayable video frames");

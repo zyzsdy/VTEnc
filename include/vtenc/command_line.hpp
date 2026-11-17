@@ -48,7 +48,15 @@ struct ColorspaceConfig {
 enum class ColorRange { automatic, limited, full };
 enum class ChromaLocation { automatic, left, center, top_left };
 
+struct IvtcConfig {
+    bool enabled = false;
+    bool log = false;
+    int cycle = 5; // 0: field matching only; 5: hard 3:2 telecine.
+    int post = 2, nt = 10, cthresh = 4, combpel = 8, dthresh = 7;
+};
+
 struct FilterConfig {
+    IvtcConfig ivtc;
     bool bob = false;
     FieldOrder field_order = FieldOrder::automatic;
     std::optional<std::array<int, 2>> output_size;
