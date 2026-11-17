@@ -79,7 +79,15 @@ std::string configuration_json(const EncodeConfig& c, bool transcode) {
       << ",\"audio_sample_rate\":" << (c.audio_sample_rate ? std::to_string(c.audio_sample_rate) : "null")
       << ",\"gop\":" << c.gop << ",\"bitrate\":" << (c.quality ? "null" : std::to_string(c.bitrate)) << ",\"quality\":";
     if (c.quality) s << *c.quality; else s << "null";
-    s << ",\"subtitles\":[";
+    s << ",\"rate_control\":" << json_string(c.quality ? "quality" : c.rate_control == RateControl::constant ? "cbr" : c.rate_control == RateControl::variable ? "vbr" : "abr")
+      << ",\"max_bitrate\":" << (c.max_bitrate ? std::to_string(*c.max_bitrate) : c.vbv_maxrate ? std::to_string(*c.vbv_maxrate) : "null")
+      << ",\"bitrate_window_seconds\":" << (c.max_bitrate ? std::to_string(c.bitrate_window) : "null")
+      << ",\"vbv_buffer_bits\":" << (c.vbv_buffer_bits ? std::to_string(*c.vbv_buffer_bits) : "null")
+      << ",\"vbv_duration_seconds\":" << (c.vbv_duration ? std::to_string(*c.vbv_duration) : "null")
+      << ",\"preset\":" << json_string(!c.prioritize_speed ? "default" : *c.prioritize_speed ? "performance" : "quality")
+      << ",\"force_keyframes\":[";
+    for (std::size_t i = 0; i < c.force_keyframes.size(); ++i) { if (i) s << ','; s << c.force_keyframes[i]; }
+    s << "],\"subtitles\":[";
     for (std::size_t i=0;i<c.subtitles.size();++i) {
         const auto& sub=c.subtitles[i]; if (i) s << ',';
         s << "{\"filename\":" << json_string(sub.filename) << ",\"fontsdir\":" << json_string(sub.fontsdir)
@@ -222,7 +230,23 @@ void StatusReporter::capabilities(const EncoderCapabilities& c, std::string_view
       << ",\"pixel_format\":" << json_string(c.config.bit_depth == 10 ? "P010-video-range" : "NV12-video-range")
       << ",\"require_hardware_encoder\":true},\"frames_encoded\":false,\"property_values_validated\":false,\"property_names\":[";
     for (std::size_t i = 0; i < c.property_names.size(); ++i) { if (i) s << ','; s << json_string(c.property_names[i]); }
-    s << "],\"features\":{\"json_status\":\"available\",\"y4m_420_8_10\":\"available_requires_avsw\","
+    s << "],\"control_probes\":[";
+    for (std::size_t i = 0; i < c.controls.size(); ++i) {
+        if (i) s << ',';
+        const auto& probe = c.controls[i];
+        s << "{\"name\":" << json_string(probe.name) << ",\"enumerated\":" << probe.enumerated
+          << ",\"stage\":" << json_string(probe.stage) << ",\"settings\":" << probe.settings_json
+          << ",\"encoder_id\":" << json_string(probe.encoder_id) << ",\"frames_encoded\":false,\"bitstream_validated\":false"
+          << ",\"error\":" << (probe.error.empty() ? "null" : json_string(probe.error))
+          << ",\"os_status\":" << (probe.os_status ? std::to_string(*probe.os_status) : "null") << '}';
+    }
+    s << "],\"native_presets\":{\"probe_level\":" << json_string(c.native_presets_status ? "read_only" : "unavailable_api")
+      << ",\"minimum_macos\":\"26.0\",\"settings\":" << c.native_presets_json
+      << ",\"os_status\":" << (c.native_presets_status ? std::to_string(*c.native_presets_status) : "null")
+      << ",\"cli_exposed\":false},\"features\":{\"json_status\":\"available\",\"y4m_420_8_10\":\"available_requires_avsw\","
+         "\"encoder_controls\":\"implemented_requires_session_probe_and_job_validation\","
+         "\"strict_gop\":\"unsupported_no_public_api\",\"frame_reordering\":\"disabled_by_pipeline\","
+         "\"lookahead_ref_open_gop_profile_override\":\"not_exposed_out_of_scope\","
          "\"software_video_encoding\":\"unsupported_by_design\",\"other_encode_configurations\":\"unverified\","
          "\"cfr\":\"available_requires_explicit_fps\",\"dar_override\":\"available_orthogonal_transform\",\"aac_transcode\":\"available_audiotoolbox_lc_mono_stereo_44100_48000_file_output\",\"subtitle_burn\":\"available_external_ass_ssa_libass_metal_sdr_pq_hlg\",\"color_tags\":\"available_labels_only\",\"hdr_static_metadata\":\"available_hdr10_applicability_checked\",\"parameter_sets\":\"container_specific_annexb_sync_headers\"}";
     event("capabilities", s.str());

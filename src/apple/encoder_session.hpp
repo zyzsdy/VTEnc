@@ -4,6 +4,7 @@
 #include "vtenc/error.hpp"
 #include "cf_ref.hpp"
 #include "timeline.hpp"
+#include "encoder_controls.hpp"
 
 #include <VideoToolbox/VideoToolbox.h>
 #include <cstdint>
@@ -96,9 +97,9 @@ inline void configure_hardware_encoder(VTCompressionSessionRef session, const En
         CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &value));
         set(key, number.get(), name);
     };
-    set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, "AllowFrameReordering");
-    set(kVTCompressionPropertyKey_RealTime, kCFBooleanFalse, "RealTime");
-    set_integer(kVTCompressionPropertyKey_MaxKeyFrameInterval, config.gop, "MaxKeyFrameInterval");
+    if (source_format && config.rate_control == RateControl::constant && config.sync == SyncMode::vfr)
+        throw std::invalid_argument("Native CBR for avformat input requires explicit CFR and frame rate");
+    apply_encoder_controls(session, config);
     if (config.filter.bob || config.filter.yadif.enabled) set_integer(kVTCompressionPropertyKey_FieldCount, 1, "FieldCount [deinterlaced progressive output]");
     if (!source_format || config.sync != SyncMode::vfr) {
         // Floating point is only an encoder rate hint. All submitted times use CMTime integers.
@@ -106,10 +107,6 @@ inline void configure_hardware_encoder(VTCompressionSessionRef session, const En
         CFRef rate(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &fps));
         set(kVTCompressionPropertyKey_ExpectedFrameRate, rate.get(), "ExpectedFrameRate");
     }
-    if (config.quality) {
-        CFRef quality(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &*config.quality));
-        set(kVTCompressionPropertyKey_Quality, quality.get(), "Quality");
-    } else set_integer(kVTCompressionPropertyKey_AverageBitRate, config.bitrate, "AverageBitRate");
     if (!source_format) {
         set(kVTCompressionPropertyKey_ColorPrimaries, kCMFormatDescriptionColorPrimaries_ITU_R_709_2, "ColorPrimaries");
         set(kVTCompressionPropertyKey_TransferFunction, kCMFormatDescriptionTransferFunction_ITU_R_709_2, "TransferFunction");

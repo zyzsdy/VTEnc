@@ -338,7 +338,7 @@ private:
 class EncodedVideo {
 public:
     EncodedVideo(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
-        : config_(std::move(config)), cancelled_(cancelled) {
+        : config_(std::move(config)), cancelled_(cancelled), rate_verifier_(config_) {
         auto processed = std::make_unique<ProcessedFrames>(input, config_, cancelled);
         processed_ = processed.get();
         frames_ = std::move(processed);
@@ -384,6 +384,7 @@ public:
         }
         check_status(VTCompressionSessionPrepareToEncodeFrames(session_.value), "Prepare container video encoder");
         verify_hardware(session_.value);
+        report_encoder_controls(session_.value, config_);
         if (config_.status) config_.status->session(config_, hardware_encoder_id(session_.value), true, CVPixelBufferGetPixelFormatType(pixel));
     }
     ~EncodedVideo() {
@@ -407,9 +408,10 @@ public:
         }
         error_ = nullptr;
         output_.reset();
+        const auto options = keyframe_options(config_, encoded_frames_);
         VTEncodeInfoFlags flags = 0;
         check_status(VTCompressionSessionEncodeFrame(session_.value, pixel, pts, duration,
-            nullptr, nullptr, &flags), "Encode transcoded frame");
+            options.get(), nullptr, &flags), "Encode transcoded frame");
         check_status(VTCompressionSessionCompleteFrames(session_.value, kCMTimeInvalid), "Drain transcoded frame");
         if (error_) std::rethrow_exception(error_);
         if (!output_ || (flags & kVTEncodeInfo_FrameDropped)) throw std::runtime_error("Encoder dropped a transcoded frame");
@@ -433,6 +435,8 @@ public:
         }
         verify_output_metadata(metadata_->get(),CMSampleBufferGetFormatDescription(output_->get()));
         if (sar_) verify_display_sar(CMSampleBufferGetFormatDescription(output_->get()), *sar_);
+        verify_keyframe(config_, encoded_frames_++, output_->get());
+        rate_verifier_.append(output_->get());
         auto normalized=normalize_hdr_sei(output_->get(),metadata_->get());
         CFRetain(normalized.get());
         return normalized.get();
@@ -443,6 +447,7 @@ public:
             check_status(VTCompressionSessionCompleteFrames(session_.value, kCMTimeInvalid), "Drain final transcoded frames");
             if (error_) std::rethrow_exception(error_);
             verify_hardware(session_.value);
+            if (!cancelled_) verify_keyframe_count(config_, encoded_frames_);
         }
     }
 private:
@@ -465,6 +470,8 @@ private:
     std::unique_ptr<DecodedFrames> frames_;
     ProcessedFrames* processed_ = nullptr; // Owned by frames_ or its CFR decorator.
     std::unique_ptr<Frame> current_;
+    EncoderRateVerifier rate_verifier_;
+    std::int64_t encoded_frames_ = 0;
     bool advance_ = false;
     std::optional<std::array<int, 2>> sar_;
     std::optional<CFRef<CMSampleBufferRef>> output_;

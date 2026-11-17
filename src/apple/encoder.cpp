@@ -28,7 +28,7 @@ namespace {
 class RawOutput {
 public:
     RawOutput(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled)
-        : config_(config), cancelled_(cancelled) {
+        : config_(config), cancelled_(cancelled), rate_verifier_(config) {
         const auto* format = config.output_format.empty()
             ? av_guess_format(nullptr, config.output.c_str(), nullptr)
             : av_guess_format(config.output_format.c_str(), nullptr, nullptr);
@@ -38,6 +38,8 @@ public:
         }
     }
     void append(CMSampleBufferRef sample) {
+        verify_keyframe(config_, frames_, sample);
+        rate_verifier_.append(sample);
         if (config_.dar) verify_display_sar(CMSampleBufferGetFormatDescription(sample),
             display_sar(*config_.dar, config_.video.width, config_.video.height, {1, 0, 0, 1, 0, 0}));
         if (elementary_) { elementary_->append(sample); ++frames_; report(sample); return; }
@@ -81,6 +83,7 @@ private:
     std::uint64_t video_bytes_ = 0;
     const EncodeConfig& config_;
     const volatile std::sig_atomic_t& cancelled_;
+    EncoderRateVerifier rate_verifier_;
     std::unique_ptr<BitstreamOutput> elementary_;
     std::unique_ptr<ContainerOutput> mux_;
     std::int64_t frames_ = 0;
@@ -236,6 +239,7 @@ EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const
     configure_hardware_encoder(session.value, output_config);
     check_status(VTCompressionSessionPrepareToEncodeFrames(session.value), "Prepare raw Bob hardware encoder");
     verify_hardware(session.value);
+    report_encoder_controls(session.value, output_config);
     const auto type = config.video.bit_depth == 10 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
     if (config.status) config.status->session(output_config, hardware_encoder_id(session.value), false, type);
     auto pool = make_metal_pixel_pool(config.video.width, config.video.height, type);
@@ -258,9 +262,10 @@ EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const
         for (unsigned field = 0; field < 2 && !cancelled; ++field) {
             auto processed = filter->process(raw, static_cast<int>(first ^ field));
             const auto timing = bob_time(CMTimeMake(index * config.fps_den, config.fps_num), CMTimeMake(config.fps_den, config.fps_num), field);
+            const auto options = keyframe_options(config, submitted);
             VTEncodeInfoFlags flags = 0;
             check_status(VTCompressionSessionEncodeFrame(session.value, processed.get(), timing.pts, timing.duration,
-                nullptr, nullptr, &flags), "Encode raw Bob field=" + std::to_string(field));
+                options.get(), nullptr, &flags), "Encode raw Bob field=" + std::to_string(field));
             if (flags & kVTEncodeInfo_FrameDropped) throw std::runtime_error("Hardware encoder dropped a Bob field");
             ++submitted;
             check_status(VTCompressionSessionCompleteFrames(session.value, kCMTimeInvalid), "Drain raw Bob field");
@@ -270,6 +275,7 @@ EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const
     }
     verify_hardware(session.value);
     if (cancelled) return {output.frames(), output.bytes(), true, 0, submitted};
+    verify_keyframe_count(output_config, submitted);
     if (submitted != output_config.frames) throw std::runtime_error("Wrong Bob output count");
     if (config.status) config.status->check_diagnostics();
     const bool published = output.publish(cancelled);
@@ -296,6 +302,7 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
     configure_hardware_encoder(session.value, config);
     check_status(VTCompressionSessionPrepareToEncodeFrames(session.value), "VTCompressionSessionPrepareToEncodeFrames");
     verify_hardware(session.value);
+    report_encoder_controls(session.value, config);
     if (config.status) config.status->session(config, hardware_encoder_id(session.value), false, config.video.bit_depth == 10
         ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
     std::int64_t submitted = 0;
@@ -309,10 +316,11 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
                 "CVPixelBufferPoolCreatePixelBuffer [frame=" + std::to_string(submitted) + "]");
             CFRef pixel(raw);
             source.fill(pixel.get(), config, submitted);
+            const auto options = keyframe_options(config, submitted);
             VTEncodeInfoFlags flags = 0;
             check_status(VTCompressionSessionEncodeFrame(session.value, pixel.get(),
                 CMTimeMake(submitted * config.fps_den, config.fps_num), CMTimeMake(config.fps_den, config.fps_num),
-                nullptr, nullptr, &flags), "VTCompressionSessionEncodeFrame [frame=" + std::to_string(submitted) + "]");
+                options.get(), nullptr, &flags), "VTCompressionSessionEncodeFrame [frame=" + std::to_string(submitted) + "]");
             if (flags & kVTEncodeInfo_FrameDropped) throw std::runtime_error("VideoToolbox dropped input frame=" + std::to_string(submitted));
             ++submitted;
         }
@@ -324,6 +332,7 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
     queue.drain(output);
     verify_hardware(session.value); // Verify again after actual frame encoding.
     if (cancelled) return {output.frames(), output.bytes(), true};
+    verify_keyframe_count(config, output.frames());
     if (output.frames() != config.frames) throw std::runtime_error("Encoded frame count differs from requested count");
     if (config.status) config.status->check_diagnostics();
     const bool published = output.publish(cancelled);

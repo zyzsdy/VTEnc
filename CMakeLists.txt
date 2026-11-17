@@ -58,6 +58,7 @@ configure_file(src/apple/shaders/filter_shader.hpp.in generated/filter_shader.hp
 
 add_library(vtenc_apple STATIC
     src/apple/encoder.cpp
+    src/apple/encoder_controls.cpp
     src/apple/subtitle.cpp
     src/apple/output_metadata.cpp
     src/apple/transcode.cpp
@@ -102,6 +103,11 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" -DVTENC=$<TARGET_FILE:vtenc>
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake")
     set_tests_properties(vtenc.cli PROPERTIES LABELS "cli" TIMEOUT 15)
+    add_executable(vtenc_encoder_controls_test tests/encoder_controls_test.cpp)
+    target_include_directories(vtenc_encoder_controls_test PRIVATE src/apple)
+    target_link_libraries(vtenc_encoder_controls_test PRIVATE vtenc_apple vtenc_options)
+    add_test(NAME vtenc.encoder-controls COMMAND vtenc_encoder_controls_test)
+    set_tests_properties(vtenc.encoder-controls PROPERTIES LABELS "encoder" TIMEOUT 15)
     add_executable(vtenc_output_metadata_test tests/output_metadata_test.cpp)
     target_include_directories(vtenc_output_metadata_test PRIVATE src/apple)
     target_link_libraries(vtenc_output_metadata_test PRIVATE vtenc_apple vtenc_options)

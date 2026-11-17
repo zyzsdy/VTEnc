@@ -12,6 +12,7 @@ namespace vtenc {
 
 enum class Command { help, version, check_device, check_features, encode, transcode };
 enum class Codec { h264, hevc };
+enum class RateControl { average, constant, variable };
 enum class SyncMode { vfr, cfr, forcecfr };
 enum class DecodeMode { automatic, hardware, software };
 
@@ -119,7 +120,15 @@ struct EncodeConfig {
     std::int32_t fps_num = 30;
     std::int32_t fps_den = 1;
     std::int32_t gop = 60;
-    std::int32_t bitrate = 5'000'000; // AverageBitRate, bits/s; unused when quality is set.
+    std::int32_t bitrate = 5'000'000; // bits/s; unused when quality is set.
+    RateControl rate_control = RateControl::average;
+    std::optional<std::int32_t> max_bitrate; // ABR DataRateLimits, bits/s.
+    double bitrate_window = 1.0; // Sliding window in seconds.
+    std::optional<std::int32_t> vbv_maxrate; // Native VBR only, bits/s.
+    std::optional<std::int64_t> vbv_buffer_bits; // CLI --vbv-bufsize kbit converted to bits.
+    std::optional<double> vbv_duration; // Native VBR only, seconds.
+    std::optional<bool> prioritize_speed; // Unset leaves the encoder default.
+    std::vector<std::int64_t> force_keyframes; // Zero-based output frame indices after filters/CFR.
     std::optional<double> quality;
     SyncMode sync = SyncMode::vfr;
     std::optional<std::array<int, 2>> dar; // Display aspect after orthogonal rotation.

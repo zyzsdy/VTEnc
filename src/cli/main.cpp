@@ -111,6 +111,12 @@ int main(int argc, char* argv[]) {
                       << "Hardware verified: " << (capabilities.hardware ? "yes" : "no") << '\n'
                       << "Session prepared; no frames encoded. Advertised properties (values not validated):\n";
             for (const auto& name : capabilities.property_names) std::cout << "  " << name << '\n';
+            std::cout << "Public control probes (no frames encoded; no bitrate/bitstream guarantee):\n";
+            for (const auto& control : capabilities.controls) {
+                std::cout << "  " << control.name << ": " << control.stage << " " << control.settings_json << '\n';
+                if (!control.error.empty()) std::cout << "    " << control.error << '\n';
+            }
+            std::cout << "Native preset dictionaries (read only; not CLI presets): " << capabilities.native_presets_json << '\n';
             break;
         }
         case vtenc::Command::encode:

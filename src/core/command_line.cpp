@@ -3,6 +3,7 @@
 #include "vtenc/subtitle.hpp"
 
 #include <charconv>
+#include <fstream>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -21,6 +22,36 @@ std::int32_t positive_integer(std::string_view value, std::string_view option) {
         throw std::invalid_argument(std::string(option) + " requires an integer in 1..2147483647");
     }
     return number;
+}
+double positive_seconds(std::string_view value, std::string_view option) {
+    double number = 0;
+    std::istringstream parser{std::string(value)};
+    parser.imbue(std::locale::classic());
+    parser >> std::noskipws >> number;
+    if (!parser || parser.peek() != std::char_traits<char>::eof() || !std::isfinite(number) || number <= 0 || number > 60)
+        throw std::invalid_argument(std::string(option) + " requires finite seconds in (0,60]");
+    return number;
+}
+void parse_keyfile(std::string_view filename, std::vector<std::int64_t>& frames) {
+    std::ifstream input{std::string(filename)};
+    if (!input) throw std::invalid_argument("Cannot open --keyfile: " + std::string(filename));
+    std::string line;
+    std::size_t line_number = 0;
+    while (std::getline(input, line)) {
+        ++line_number;
+        const auto first = line.find_first_not_of(" \t\r");
+        if (first == std::string::npos) continue;
+        const auto last = line.find_last_not_of(" \t\r");
+        const auto token = std::string_view(line).substr(first, last - first + 1);
+        std::int64_t number = -1;
+        const auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), number);
+        if (error != std::errc{} || end != token.data() + token.size() || number < 0 ||
+            (!frames.empty() && number <= frames.back()) || frames.size() >= 1'000'000)
+            throw std::invalid_argument("--keyfile requires strictly increasing nonnegative frame indices (one per line; max 1000000), line=" + std::to_string(line_number));
+        frames.push_back(number);
+    }
+    if (input.bad()) throw std::runtime_error("Failed reading --keyfile: " + std::string(filename));
+    if (frames.empty()) throw std::invalid_argument("--keyfile contains no frame indices");
 }
 void parse_ivtc(std::string_view value, IvtcConfig& config) {
     if (value.empty()) throw std::invalid_argument("Empty --vpp-ivtc parameter");
@@ -91,6 +122,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (arg == "-h") arg = "--help";
         if (arg == "--input") arg = "-i";
         if (arg == "--output") arg = "-o";
+        if (arg == "-u") arg = "--preset";
         if (arg == "-f") arg = "--output-format";
         if (arg != "--vpp-subburn" && !seen.insert(arg).second) throw std::invalid_argument("Duplicate option: " + std::string(arg));
         if (arg == "--help" || arg == "--version" || arg == "--check-device" || arg == "--check-features") {
@@ -142,6 +174,8 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         const bool common = arg == "--codec" || arg == "--output-depth";
         if (!common && arg != "--output-format" && arg != "-i" && arg != "-o" && arg != "--input-res" && arg != "--fps" &&
             arg != "--avsync" && arg != "--dar" && arg != "--audio-codec" && arg != "--audio-bitrate" && arg != "--audio-samplerate" &&
+            arg != "--cbr" && arg != "--vbr" && arg != "--max-bitrate" && arg != "--bitrate-window" &&
+            arg != "--vbv-bufsize" && arg != "--preset" && arg != "--keyfile" &&
             arg != "--frames" && arg != "--gop-len" && arg != "--bitrate" && arg != "--quality" &&
             arg != "--vpp-subburn" && arg != "--color-tags" && arg != "--hdr-metadata" && arg != "--master-display" && arg != "--max-cll" && arg != "--vpp-colorspace" && arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
             arg != "--input-matrix" && arg != "--output-matrix" && arg != "--input-chroma-loc" && arg != "--deinterlace" && arg != "--field-order") {
@@ -282,12 +316,23 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             result.encode.fps_den /= divisor;
         } else if (arg == "--frames") result.encode.frames = positive_integer(value, arg);
         else if (arg == "--gop-len") result.encode.gop = positive_integer(value, arg);
-        else if (arg == "--bitrate") {
+        else if (arg == "--keyfile") parse_keyfile(value, result.encode.force_keyframes);
+        else if (arg == "--preset") {
+            if (value != "default" && value != "quality" && value != "performance")
+                throw std::invalid_argument("--preset requires default, performance or quality; NVENC P1-P7 are not VideoToolbox presets");
+            if (value != "default") result.encode.prioritize_speed = value == "performance";
+        } else if (arg == "--bitrate-window") result.encode.bitrate_window = positive_seconds(value, arg);
+        else if (arg == "--vbv-bufsize") result.encode.vbv_buffer_bits = static_cast<std::int64_t>(positive_integer(value, arg)) * 1000;
+        else if (arg == "--bitrate" || arg == "--cbr" || arg == "--vbr" || arg == "--max-bitrate") {
             const auto kbps = positive_integer(value, arg);
             if (kbps > std::numeric_limits<std::int32_t>::max() / 1000) {
-                throw std::invalid_argument("--bitrate exceeds 2147483 kbit/s");
+                throw std::invalid_argument(std::string(arg) + " exceeds 2147483 kbit/s");
             }
-            result.encode.bitrate = kbps * 1000;
+            if (arg == "--max-bitrate") result.encode.max_bitrate = kbps * 1000;
+            else {
+                result.encode.bitrate = kbps * 1000;
+                result.encode.rate_control = arg == "--cbr" ? RateControl::constant : arg == "--vbr" ? RateControl::variable : RateControl::average;
+            }
         } else if (arg == "--quality") {
             double quality = 0;
             std::istringstream parser{std::string(value)};
@@ -376,9 +421,29 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             }
         }
         if (result.command == Command::encode && result.encode.input == "-") throw std::invalid_argument("Raw input must be a regular file; stdin is not supported");
-        if (seen.contains("--bitrate") && seen.contains("--quality")) {
-            throw std::invalid_argument("--bitrate and --quality are mutually exclusive");
+        if (seen.count("--bitrate") + seen.count("--quality") + seen.count("--cbr") + seen.count("--vbr") > 1)
+            throw std::invalid_argument("--bitrate, --quality, --cbr and --vbr are mutually exclusive");
+        if (result.encode.max_bitrate && (result.encode.quality || result.encode.rate_control == RateControl::constant))
+            throw std::invalid_argument("--max-bitrate requires ABR or native VBR; incompatible with --quality and --cbr");
+        if (result.encode.max_bitrate && *result.encode.max_bitrate < result.encode.bitrate)
+            throw std::invalid_argument("--max-bitrate must be at least the bitrate target");
+        if (seen.contains("--bitrate-window") && (!result.encode.max_bitrate || result.encode.rate_control != RateControl::average))
+            throw std::invalid_argument("--bitrate-window requires ABR with --max-bitrate; incompatible with native VBR/VBV");
+        if (result.encode.vbv_buffer_bits && (result.encode.rate_control != RateControl::variable || !result.encode.max_bitrate))
+            throw std::invalid_argument("--vbv-bufsize requires --vbr and explicit --max-bitrate");
+        if (result.encode.rate_control == RateControl::variable) {
+            result.encode.vbv_maxrate = result.encode.max_bitrate;
+            result.encode.max_bitrate.reset(); // Never send DataRateLimits in VBR mode.
+            if (result.encode.vbv_buffer_bits) {
+                result.encode.vbv_duration = static_cast<double>(*result.encode.vbv_buffer_bits) / *result.encode.vbv_maxrate;
+                if (*result.encode.vbv_duration > 60) throw std::invalid_argument("--vbv-bufsize / --max-bitrate exceeds 60 seconds");
+            }
         }
+        if (result.command == Command::transcode && result.encode.rate_control == RateControl::constant && result.encode.sync == SyncMode::vfr)
+            throw std::invalid_argument("--cbr requires --avsync cfr/forcecfr and explicit --fps for avformat input");
+        const auto output_frames = static_cast<std::int64_t>(result.encode.frames) * (result.encode.filter.bob ? 2 : 1);
+        if (result.command == Command::encode && !result.encode.force_keyframes.empty() && result.encode.force_keyframes.back() >= output_frames)
+            throw std::invalid_argument("--keyfile index exceeds the output frame count");
     } else if ((seen.contains("--codec") || seen.contains("--output-depth")) && result.command != Command::check_features) {
         throw std::invalid_argument("--codec and --output-depth require --check-features or an encoding source");
     }
@@ -413,10 +478,10 @@ Usage:
         [--hdr-metadata auto|clear|preserve] [--master-display INTEGER_LIST]
         [--max-cll MaxCLL,MaxFALL]
         [--deinterlace bob | --vpp-ivtc [PARAMS] | --vpp-yadif [mode=MODE]] [--field-order auto|tff|bff]
-        [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
+        [--bitrate KBIT/S | --quality 0..1 | --cbr KBIT/S | --vbr KBIT/S] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
         --frames COUNT [-f FORMAT | --output-format FORMAT] [--codec h264|hevc] [--output-depth 8|10]
-        [--fps NUM[/DEN]] [--dar NUM:DEN] [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
+        [--fps NUM[/DEN]] [--dar NUM:DEN] [--bitrate KBIT/S | --quality 0..1 | --cbr KBIT/S | --vbr KBIT/S] [--gop-len COUNT]
 
 --json-status: versioned JSON Lines on stderr, including diagnostics and terminal
 events; without it, live progress and all encoding logs also use stderr. Unknown
@@ -440,11 +505,30 @@ overwritten. -o - streams to stdout and requires -f/--output-format; all job log
 go to stderr. The muxer must support non-seekable output. Muxers managing their own
 IO (e.g. HLS/segment) are not supported. Raw/synthetic elementary file output also
 writes a timestamps CSV; stdout never writes sidecar files.
-P1 disables frame reordering. --quality is native VT Quality, not CRF/CQP.
+Encoding controls (hardware support checked for each session):
+--max-bitrate KBIT/S: ABR uses DataRateLimits over --bitrate-window SECONDS
+(default 1); native VBR uses VBVMaxBitRate. Max must be >= target.
+--vbr uses native VariableBitRate (macOS 26+). --vbv-bufsize KBIT requires VBR
+and --max-bitrate; VBVBufferDuration = buffer kbit / max kbit/s (up to 60 s).
+VBV is a buffer model, not a sliding-window cap or an instantaneous frame cap.
+A VBR max without --vbv-bufsize explicitly uses 2.5 seconds of buffer capacity.
+Actual coded samples are checked against ABR windows / VBR buffer envelopes;
+overshoot fails the job. File output is discarded; stdout may already be partial.
+Limits exclude muxer overhead and parameter sets added by output adaptation.
+--cbr uses native ConstantBitRate with padding; avformat input requires explicit
+CFR/forcecfr and --fps. CBR/VBR/ABR/Quality are mutually exclusive.
+-u, --preset default|performance|quality selects encoder default or sets the
+native speed-over-quality hint true/false. No P1-P7 equivalence or speed guarantee.
+--keyfile FILE reads zero-based output frame indices, one per line, after filters
+and CFR. Indices must increase, exist in output, and produce sync samples.
+--gop-len is only a maximum interval; extra keyframes remain allowed.
+No strict GOP, B-frame count, lookahead or native preset passthrough is exposed.
+Frame reordering remains disabled. --quality is native VT Quality, not CRF/CQP.
 SIGINT drains submitted frames (exit 130). Incomplete files are discarded; stdout
 bytes already written cannot be retracted.
-Feature probing creates a hardware-only 1920x1080 VideoToolbox session.
-Listed properties are not validated value combinations; the probe encodes no frames.
+Feature probing creates independent hardware-only 1920x1080 sessions and checks
+selected public control combinations. Listed properties are not arbitrary-value
+guarantees; the probe encodes no frames and does not verify rate behavior.
 Compressed input: avformat probes any format; hardware-only encode.
 --avsync defaults to vfr. cfr/forcecfr require --fps; sample-and-hold on a grid
 anchored at the first filtered video PTS, after Bob/IVTC. cfr clips the last

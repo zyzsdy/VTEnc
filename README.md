@@ -13,7 +13,7 @@
 - H.264 8-bit、HEVC 8/10-bit 的硬件会话探测与支持属性枚举。
 - Objective-C++ / ARC 的 Metal 设备查询。
 - 合成测试帧 / 原始 NV12、P010 输入，H.264 High 8-bit、HEVC Main 8-bit / Main10 硬件编码。
-- 平均码率目标或原生 Quality、GOP 上限、整数有理数帧率；Annex B 输出及逐帧时间戳 CSV。
+- ABR、原生 Quality / CBR / VBR，按实际码流检查的 ABR 上限 / VBR 缓冲约束，速度倾向预设、GOP 上限及定点关键帧；详见 P8。
 - 压缩输入统一交给 `libavformat` 自动探测，不设格式或扩展名白名单；支持实测 MKV、TS、WebM、MP4/MOV 等，探测失败直接报错。原生 VideoToolbox 硬解或 `libavcodec` 软解，原生硬编，avformat 根据输出文件名选择封装器，或由 `-f` / `--output-format` 显式指定；默认复制第一条音轨。
 - 文件转码将源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换传入封装器，精度与元数据保存取决于目标格式；支持 `hev1` 描述适配。
 - 外部 ASS/SSA 字幕：libass 排版／字形掩码、Metal 线性光合成与缓存、中文字体、偏移／透明度／裁剪／多层、SDR 8/10-bit 与 PQ/HLG。独立颜色标签及 HDR10 静态元数据策略见 P6。
@@ -100,7 +100,7 @@ python3 tests/encode_hardware.py --vtenc build/dev/vtenc
 
 输入尺寸和帧数必须显式提供。`-i` 只接受普通原始文件：8-bit 是紧密排列的 NV12（Y 后接交错 UV），10-bit 是小端 P010（每个 16-bit 字的高 10 位有效，低 6 位为零）；文件中没有行填充。`--output-depth` 同时决定原始输入格式，不做位深转换。只读 `--frames` 指定的帧数，尾部数据不消费，输入不足则报错。合成输入为移动灰阶渐变。
 
-本阶段限定逐行、video range、BT.709 SDR；调用方负责提供符合约定的原始数据。10-bit 不等于 HDR；本阶段不读取或转换输入色彩元数据。帧率是整数或整数分数，PTS 从 0 开始，以 `帧号 × fps_den / fps_num` 构造，不做浮点累积。默认禁用帧重排；原始帧输入使用固定帧率，不携带音频，可输出裸码流或 avformat 容器。
+本阶段限定逐行、video range、BT.709 SDR；调用方负责提供符合约定的原始数据。10-bit 不等于 HDR；本阶段不读取或转换输入色彩元数据。帧率是整数或整数分数，PTS 从 0 开始，以 `帧号 × fps_den / fps_num` 构造，不做浮点累积。固定禁用编码帧重排；原始帧输入使用固定帧率，不携带音频，可输出裸码流或 avformat 容器。
 
 默认平均码率目标为 5000 kbit/s。`--bitrate` 绑定 `AverageBitRate`，是软目标，不保证输出大小；`--quality` 绑定原生 `Quality`，不等价于 CRF/CQP，两者不能同时指定。`--gop-len` 是最大关键帧间隔，编码器可以提前插入关键帧。所有属性设置检查 OSStatus，不支持就失败，不做软件回退。
 
@@ -109,6 +109,47 @@ python3 tests/encode_hardware.py --vtenc build/dev/vtenc
 同目录临时文件在全部排空、帧数与时间戳校验、硬件后端复核后发布；已有输出或时间戳文件均不覆盖。每批最多 8 帧，回调只保留样本或记录错误，调度线程负责码流写出。SIGINT 停止新提交、排空已提交帧、删除临时输出并返回 130。运行错误返回 1 并清理临时输出；进程被强制杀死或系统崩溃时可能残留 `.part.*` 文件。两个文件分别原子发布，不承诺跨文件的崩溃事务。
 
 2026-11-16 在 Apple M6 / macOS 27.2.1 上完成三种格式的真实硬编及独立码流验证，覆盖合成输入、非对齐宽度原始输入、尾批排空及异常路径。详见 [P1 验证记录](docs/P1验证.md)。该结果不代表其他硬件、旧 macOS、任意分辨率或 HDR 已验证。
+
+## P8：编码控制与 NVEnc 风格参数
+
+本轮实现和实测范围见 [P8 验证](docs/P8验证.md)。参数名称与单位参考 NVEnc；不复制 NVIDIA 的算法、P1～P7 档位或 CQP 标度。实际支持取决于当前会话，属性设置、准备、回读或输出检查失败都会终止任务。
+
+| 参数 | VideoToolbox 语义与限制 |
+| --- | --- |
+| `--bitrate KBIT/S` | ABR 软目标 `AverageBitRate`；默认 5000 |
+| `--quality 0..1` | 原生 `Quality`，不等价于 CRF/CQP |
+| `--cbr KBIT/S` | 原生 `ConstantBitRate`，包括低复杂度画面的填充；不是每帧等大或任意窗口恒定。avformat 输入须显式 `--avsync cfr/forcecfr --fps NUM[/DEN]` |
+| `--vbr KBIT/S` | 原生 `VariableBitRate`，须 macOS 26+ 和对应 SDK / 会话支持；不接受 0 或 `--vbr-quality` |
+| `--max-bitrate KBIT/S` | ABR 模式设置 `DataRateLimits`；VBR 模式设置公开的 `VBVMaxBitRate`，两者不会混用。须不低于目标码率，Quality/CBR 不接受 |
+| `--bitrate-window SECONDS` | ABR 上限的滑动窗口，默认 1 秒，范围 `(0,60]`；须同时指定 `--max-bitrate` |
+| `--vbv-bufsize KBIT` | VBR 缓冲容量，须 `--vbr` 和显式 `--max-bitrate`；`VBVBufferDuration = 容量 kbit / 最大码率 kbit/s`，不超过 60 秒。省略时显式设置 2.5 秒 |
+| `-u, --preset default\|performance\|quality` | `default` 不覆盖原生速度倾向，另两项只设置 `PrioritizeEncodingSpeedOverQuality=true/false`，`RealTime` 始终 false。不是原生预设字典透传，不承诺性能或画质排序 |
+| `--gop-len COUNT` | 最大关键帧间隔；允许编码器额外插入关键帧 |
+| `--keyfile FILE` | 每行一个从 0 开始的输出帧号，作用于场处理、CFR 和滤镜后的编码输入；严格递增、最多 100 万项，支持空行和 CRLF。每个请求须得到同步样本，超出实际 EOF 报错 |
+
+`--bitrate`、`--quality`、`--cbr`、`--vbr` 四选一。所有码率单位使用十进制 kbit/s，缓冲容量使用十进制 kbit。特别注意 NVEnc 英文选项文档曾将缓冲单位写成 kbps，其帮助和实现实际使用 kbit；这里按容量实现，不将同名参数解释为秒。
+
+```bash
+# 原生 CBR，显式 CFR 输出
+build/dev/vtenc -i input.mp4 -o build/cbr.mp4 --codec hevc \
+  --avsync cfr --fps 30000/1001 --cbr 5000 --preset quality
+
+# 原生 VBR + 最大输入速率 8 Mbit/s、容量 16 Mbit 的缓冲模型
+build/dev/vtenc -i input.mp4 -o build/vbr.mp4 --codec hevc \
+  --vbr 5000 --max-bitrate 8000 --vbv-bufsize 16000 --preset performance
+
+# ABR + 两秒滑动窗口（允许窗口内出现较高的单帧码率）
+build/dev/vtenc -i input.mp4 -o build/capped.mp4 \
+  --bitrate 5000 --max-bitrate 8000 --bitrate-window 2 --keyfile keyframes.txt
+```
+
+硬件接受属性不等于码流服从约束。本机高熵突变及密集关键帧样本中，`DataRateLimits` / VBV 会超限。VTEnc 在写入前逐包检查 ABR 的半开滑动窗口、或 VBR 的有理数泄漏桶包络；超限报告 PTS 和预算并返回非零，不降码率、不换后端、不从头软解重试。检查对象是 VideoToolbox 压缩样本，**不含容器开销、输出适配补入的参数集或音频**。VBR 包络检查不是完整 HRD / CPB 码流认证。文件模式撤销未完成文件；stdout 已发出的字节无法撤回，调用方必须检查退出码。`--keyfile` 请求过密同样可能使限码率任务失败。
+
+CBR 是原生算法请求，在静态段会填充，场景切换及极端纹理仍可能偏离目标；不要把它当作硬滑窗限速。`ExpectedFrameRate` 只是一项提示，本机对 30000/1001 回读为 29；日志记录请求值与有效值，真正提交的 PTS/duration 仍是整数有理数，未截成 29 fps。
+
+`--check-features [--codec ...] [--output-depth ...] --json-status` 在固定 1920×1080 / 30 fps 配置下为公开控制组合分别创建新会话，报告枚举、设置、准备、硬件和回读阶段；**不编码帧，也不保证任意素材或组合可用**。运行编码时 `encoder_settings` 记录原生属性请求及回读值，完整任务配置位于 `start/session.config`。能力协议详见 [P4 调用协议](docs/P4调用协议.md)。
+
+不开放 `--strict-gop`、`--bframes`、`--lookahead`、`--ref`、Open GOP / Profile / Level 覆盖和 P1～P7 预设。严格 GOP 无公开接口；当前输出调度仍禁用帧重排，固定 H.264 High / HEVC Main / Main10 AutoLevel。其他高级控制没有本轮明确需求，不将属性枚举结果当作已实现或已验证能力。原生预设字典只供诊断。
 
 ## 压缩输入转码与输出格式
 
