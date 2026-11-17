@@ -6,14 +6,13 @@
 #include "bob.hpp"
 #include "decoded_frames.hpp"
 #include "decode_policy.hpp"
+#include "ffmpeg_utils.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <optional>
-#include <thread>
 #include <vector>
 
 namespace vtenc {
@@ -177,10 +176,10 @@ private:
 class DisplayFrames final : public DecodedFrames {
 public:
     DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled, bool bob)
-        : input_(input), cancelled_(cancelled), decoder_(input.info().video_format, bob) {}
+        : input_(input), cancelled_(cancelled), decoder_(input.hardware_video_format(), bob) {}
     std::unique_ptr<Frame> next() override {
         while (!cancelled_) {
-            if (!frames_.empty() && (eof_ || (CMTIME_IS_NUMERIC(watermark_) && CMTimeCompare(frames_.front()->pts, watermark_) <= 0))) {
+            if (!frames_.empty() && (eof_ || frames_.size() >= 32)) {
                 auto frame = std::move(frames_.front());
                 frames_.erase(frames_.begin());
                 if (CMTIME_IS_NUMERIC(last_pts_) && CMTimeCompare(frame->pts, last_pts_) <= 0) {
@@ -198,17 +197,12 @@ public:
                 throw std::runtime_error("Video format changes mid-stream are not supported in P2");
             }
             const auto pts = CMSampleBufferGetOutputPresentationTimeStamp(sample.get());
-            auto dts = CMSampleBufferGetOutputDecodeTimeStamp(sample.get());
             require_time(pts, "video PTS");
-            if (!CMTIME_IS_VALID(dts)) dts = pts;
-            require_time(dts, "video DTS");
-            if (CMTimeCompare(pts, dts) < 0 || (CMTIME_IS_NUMERIC(watermark_) && CMTimeCompare(dts, watermark_) <= 0)) {
-                throw std::runtime_error("Unsupported video timing: DTS must increase and must not exceed PTS");
-            }
-            watermark_ = dts;
+            // avformat supplies decode order. Some containers (notably Matroska)
+            // omit initial DTS; never substitute reordered PTS for missing DTS.
             auto frame = decoder_.decode(sample.get());
             if (frame) {
-                if (CMTimeCompare(frame->pts, input_.info().video_range.start) < 0) continue;
+                if (CMTIME_IS_NUMERIC(input_.info().video_range.start) && CMTimeCompare(frame->pts, input_.info().video_range.start) < 0) continue;
                 if (frames_.size() >= 32) throw std::runtime_error("Video reorder queue exceeds P2's 32-frame limit");
                 frames_.push_back(std::make_unique<Frame>(std::move(*frame)));
                 std::ranges::sort(frames_, [](const auto& a, const auto& b) { return CMTimeCompare(a->pts, b->pts) < 0; });
@@ -222,7 +216,6 @@ private:
     const volatile std::sig_atomic_t& cancelled_;
     HardwareDecoder decoder_;
     std::vector<std::unique_ptr<Frame>> frames_;
-    CMTime watermark_ = kCMTimeInvalid;
     CMTime last_pts_ = kCMTimeInvalid;
     bool eof_ = false;
 };
@@ -232,7 +225,7 @@ public:
     EncodedVideo(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
         : input_(input), config_(std::move(config)), cancelled_(cancelled) {
         validate_source(input.info().video_format, config_.filter.bob);
-        if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input.info(), cancelled);
+        if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input, cancelled);
         else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob);
         current_ = frames_->next();
         if (!current_) {
@@ -272,6 +265,15 @@ public:
             following_ = frames_->next();
             if (cancelled_) return nullptr;
             frame_duration_ = following_ ? CMTimeSubtract(following_->pts, current_->pts) : current_->duration;
+            if (!following_ && (!CMTIME_IS_NUMERIC(frame_duration_) || frame_duration_.value == 0) && CMTIME_IS_NUMERIC(previous_interval_)) {
+                // TS commonly provides PTS but no packet durations. There is no
+                // next PTS for the last frame: explicitly reuse the last observed
+                // interval, never invent a nominal frame rate or shift timestamps.
+                frame_duration_ = previous_interval_;
+                std::cerr << "vtenc: input omits final frame duration; using preceding PTS interval "
+                          << frame_duration_.value << '/' << frame_duration_.timescale << " seconds\n";
+            }
+            if (following_) previous_interval_ = frame_duration_;
             require_time(frame_duration_, "video frame duration");
             if (CMTimeCompare(frame_duration_, kCMTimeZero) <= 0) throw std::runtime_error("Video frame duration must be positive");
             if (config_.filter.bob) first_field_ = bob_first_field(config_.filter.field_order, input_.info().video_format, current_->pixel.get());
@@ -359,6 +361,7 @@ private:
     std::unique_ptr<Frame> current_;
     std::unique_ptr<Frame> following_;
     CMTime frame_duration_ = kCMTimeInvalid;
+    CMTime previous_interval_ = kCMTimeInvalid;
     unsigned field_index_ = 0, first_field_ = 0;
     std::optional<CFRef<CMSampleBufferRef>> output_;
     std::exception_ptr error_;
@@ -401,72 +404,54 @@ void validate_video_edit(CMTimeMapping mapping, CMTime first_pts, CMTime last_pt
     // PTS. Preserve that whole final frame, but reject material trailing trims.
 }
 
-static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled) {
+static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled, bool& replayable) {
     if (cancelled) throw MediaCancelled{};
     ContainerInput input(config, cancelled);
+    replayable = input.info().replayable;
     EncodedVideo encoder(input, config, cancelled);
     Sample video;
     adopt(video, encoder.next());
     if (cancelled) { encoder.finish(); return {0, 0, true}; }
     if (!video) throw std::runtime_error("No encoded video output");
     ContainerOutput output(config, input.info(), CMSampleBufferGetFormatDescription(video->get()));
-    Sample audio;
-    adopt(audio, input.read_audio());
-    bool video_ended = false;
-    bool audio_ended = false;
+    auto audio = input.read_audio();
     std::int64_t video_count = 0;
     std::int64_t audio_count = 0;
     CMTime last_audio = kCMTimeInvalid;
-    auto last_progress = std::chrono::steady_clock::now();
     while ((video || audio) && !cancelled) {
-        if (!video && !video_ended) { output.end_video(); video_ended = true; }
-        if (!audio && !audio_ended) { output.end_audio(); audio_ended = true; }
-        const bool video_ready = video && output.video_ready();
-        const bool audio_ready = audio && output.audio_ready();
-        if (audio_ready && (!video_ready || CMTimeCompare(CMSampleBufferGetOutputPresentationTimeStamp(audio->get()),
-                                                        CMSampleBufferGetPresentationTimeStamp(video->get())) <= 0)) {
-            if (!CMAudioFormatDescriptionEqual(CMSampleBufferGetFormatDescription(audio->get()), input.info().audio_format,
-                kCMAudioFormatDescriptionMask_StreamBasicDescription | kCMAudioFormatDescriptionMask_MagicCookie |
-                kCMAudioFormatDescriptionMask_ChannelLayout, nullptr)) {
-                throw std::runtime_error("Audio format changes mid-stream are not supported");
-            }
-            const auto pts = CMSampleBufferGetPresentationTimeStamp(audio->get());
+        if (audio && (!video || CMTimeCompare(media_time(audio->pts, {input.info().audio_timebase_num, input.info().audio_timescale}, "audio PTS"),
+                                             CMSampleBufferGetPresentationTimeStamp(video->get())) <= 0)) {
+            const auto pts = media_time(audio->pts, {input.info().audio_timebase_num, input.info().audio_timescale}, "audio PTS");
             require_time(pts, "audio PTS");
             if (CMTIME_IS_NUMERIC(last_audio) && CMTimeCompare(pts, last_audio) <= 0) {
-                throw std::runtime_error("Audio PTS must strictly increase; duplicate/overlapping source timestamps (use --no-audio)");
+                throw std::runtime_error("Audio PTS must strictly increase; duplicate source timestamps or overlapping packets (use --no-audio)");
             }
             last_audio = pts;
-            output.append_audio(audio->get());
-            audio_count += CMSampleBufferGetNumSamples(audio->get());
-            adopt(audio, input.read_audio());
-        } else if (video_ready) {
+            output.append_audio(audio.get());
+            ++audio_count;
+            audio = input.read_audio();
+        } else {
             output.append_video(video->get());
             ++video_count;
             adopt(video, encoder.next());
-        } else {
-            if (std::chrono::steady_clock::now() - last_progress > std::chrono::seconds(30)) {
-                throw std::runtime_error("Container writer made no progress for 30 seconds");
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            continue;
         }
-        last_progress = std::chrono::steady_clock::now();
     }
     encoder.finish();
     if (cancelled) return {video_count, 0, true, audio_count};
-    if (!video_ended) output.end_video();
-    if (!audio_ended) output.end_audio();
     const auto bytes = output.finish(cancelled);
     return {video_count, bytes, bytes == 0, audio_count, encoder.gpu_frames(), config.decode};
 }
 
 EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled) try {
+    bool replayable = false;
     return with_decode_policy(config.decode, [&](DecodeMode mode) {
         auto attempt = config;
         attempt.decode = mode;
-        return transcode_attempt(attempt, cancelled);
+        return transcode_attempt(attempt, cancelled, replayable);
     }, [&](const HardwareDecodeError& error) {
         if (cancelled) throw MediaCancelled{};
+        if (!replayable) throw std::runtime_error(std::string(error.what()) +
+            "; input is not seekable: cannot restart from the beginning; select --avsw before consuming it");
         std::cerr << "vtenc: hardware decode failed: " << error.what()
                   << "\nvtenc: restarting from the beginning with software decoding (one retry)\n";
     });

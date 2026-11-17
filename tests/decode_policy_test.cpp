@@ -30,6 +30,14 @@ int main() try {
         require(value == 42 && calls.size() == 1 && reports == 0, "Successful attempt retried");
         require(calls[0] == (mode == DecodeMode::software ? mode : DecodeMode::hardware), "Wrong first attempt");
     }
+    for (const auto name : {"input.mkv", "input.ts", "input.webm", "input.unknown", "no-extension", "-"}) {
+        const std::array<std::string_view, 5> args{"-i", name, "-o", "output.mp4", "--avhw"};
+        require(vtenc::parse_command_line(args).command == vtenc::Command::transcode, "Input extension filtered before avformat");
+    }
+    {
+        const std::array<std::string_view, 8> args{"-i", "raw.any", "--input-res", "320x180", "--frames", "1", "-o", "out.h264"};
+        require(vtenc::parse_command_line(args).command == vtenc::Command::encode, "Explicit raw mode lost");
+    }
     std::vector<DecodeMode> calls;
     bool attempt_alive = false;
     int reports = 0;

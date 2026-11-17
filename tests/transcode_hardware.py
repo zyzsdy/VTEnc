@@ -195,7 +195,7 @@ def main():
     failed_output = directory / "write-failure.mov"
     result = subprocess.run([str(binary), "--avhw", "-i", str(vfr), "-o", str(failed_output)],
         preexec_fn=limit_file_size, capture_output=True, text=True, timeout=40)
-    require(result.returncode == 1 and "AVAssetWriter" in result.stderr, f"Write failure not reported: {result.stderr}")
+    require(result.returncode == 1 and any(name in result.stderr for name in ["avformat", "av_interleaved", "avio", "av_write_trailer"]), f"Write failure not reported: {result.stderr}")
     require(not failed_output.exists(), "Published failed output")
     require(not list(directory.glob("*.part.*")), "Temporary container output leaked")
     report = {"system": platform.platform(), "encoder": run([binary, "--version"]).stdout.strip(),

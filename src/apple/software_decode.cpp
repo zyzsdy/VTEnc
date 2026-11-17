@@ -1,6 +1,7 @@
 #include "decoded_frames.hpp"
 #include "encoder_session.hpp"
 #include "gpu_filter.hpp"
+#include "ffmpeg_utils.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -18,20 +19,6 @@ extern "C" {
 
 namespace vtenc {
 namespace {
-void av_check(int code, const char* operation) {
-    if (code >= 0) return;
-    char message[AV_ERROR_MAX_STRING_SIZE]{};
-    av_strerror(code, message, sizeof(message));
-    throw std::runtime_error(std::string(operation) + ": " + message + " (FFmpeg=" + std::to_string(code) + ")");
-}
-CMTime media_time(std::int64_t value, AVRational base, const char* context) {
-    if (value == AV_NOPTS_VALUE || base.num <= 0 || base.den <= 0 ||
-        value > std::numeric_limits<std::int64_t>::max() / base.num ||
-        value < std::numeric_limits<std::int64_t>::min() / base.num) {
-        throw std::runtime_error(std::string("Invalid or overflowing FFmpeg ") + context);
-    }
-    return CMTimeMake(value * base.num, base.den);
-}
 AVPixelFormat software_format(AVCodecContext*, const AVPixelFormat* formats) noexcept {
     for (auto p = formats; *p != AV_PIX_FMT_NONE; ++p) {
         const auto* description = av_pix_fmt_desc_get(*p);
@@ -70,11 +57,9 @@ private:
 }
 
 struct SoftwareFrames::Impl {
-    AVFormatContext* demux = nullptr;
+    ContainerInput& input;
     AVCodecContext* decoder = nullptr;
-    AVPacket* packet = nullptr;
     AVFrame* frame = nullptr;
-    int stream = -1;
     bool draining = false;
     bool ended = false;
     bool bob;
@@ -87,16 +72,11 @@ struct SoftwareFrames::Impl {
     AVPixelFormat layout = AV_PIX_FMT_NONE;
     OSType pixel_type = 0;
 
-    Impl(const MediaInfo& media, const FilterConfig& filter, const volatile std::sig_atomic_t& stop)
-        : bob(filter.bob), field_order(filter.field_order), info(media), cancelled(stop) {}
+    Impl(ContainerInput& source, const FilterConfig& filter, const volatile std::sig_atomic_t& stop)
+        : input(source), bob(filter.bob), field_order(filter.field_order), info(source.info()), cancelled(stop) {}
     ~Impl() {
         av_frame_free(&frame);
-        av_packet_free(&packet);
         avcodec_free_context(&decoder);
-        avformat_close_input(&demux);
-    }
-    static int interrupt(void* opaque) noexcept {
-        return static_cast<Impl*>(opaque)->cancelled != 0;
     }
     void check(int code, const char* context) const {
         if (cancelled) throw MediaCancelled{};
@@ -273,35 +253,22 @@ struct SoftwareFrames::Impl {
     }
 };
 
-SoftwareFrames::SoftwareFrames(const EncodeConfig& config, const MediaInfo& info,
+SoftwareFrames::SoftwareFrames(const EncodeConfig& config, ContainerInput& input,
                                const volatile std::sig_atomic_t& cancelled)
-    : impl_(std::make_unique<Impl>(info, config.filter, cancelled)) {
+    : impl_(std::make_unique<Impl>(input, config.filter, cancelled)) {
     auto& s = *impl_;
-    s.demux = avformat_alloc_context();
-    if (!s.demux) throw std::bad_alloc();
-    s.demux->interrupt_callback = {&Impl::interrupt, &s};
-    s.check(avformat_open_input(&s.demux, config.input.c_str(), nullptr, nullptr), "avformat_open_input");
-    s.check(avformat_find_stream_info(s.demux, nullptr), "avformat_find_stream_info");
-    for (unsigned i = 0; i < s.demux->nb_streams; ++i) {
-        if (s.demux->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            if (s.stream >= 0) throw std::runtime_error("Software input requires exactly one video track");
-            s.stream = static_cast<int>(i);
-        }
-    }
-    if (s.stream < 0) throw std::runtime_error("FFmpeg found no video track");
-    const auto* track = s.demux->streams[s.stream];
-    const auto* codec = find_software_decoder(track->codecpar->codec_id);
+    const auto* parameters = input.video_parameters();
+    const auto* codec = find_software_decoder(parameters->codec_id);
     s.decoder = avcodec_alloc_context3(codec);
     if (!s.decoder) throw std::bad_alloc();
-    s.check(avcodec_parameters_to_context(s.decoder, track->codecpar), "avcodec_parameters_to_context");
-    s.decoder->pkt_timebase = track->time_base;
+    s.check(avcodec_parameters_to_context(s.decoder, parameters), "avcodec_parameters_to_context");
+    s.decoder->pkt_timebase = input.video_time_base();
     s.decoder->get_format = &software_format;
     s.decoder->thread_count = 2; // Bounded frame threading, independent of host core count.
     s.decoder->err_recognition = AV_EF_CRCCHECK | AV_EF_BITSTREAM | AV_EF_BUFFER | AV_EF_EXPLODE;
     s.check(avcodec_open2(s.decoder, codec, nullptr), "avcodec_open2 [software only]");
-    s.packet = av_packet_alloc();
     s.frame = av_frame_alloc();
-    if (!s.packet || !s.frame) throw std::bad_alloc();
+    if (!s.frame) throw std::bad_alloc();
 }
 SoftwareFrames::~SoftwareFrames() = default;
 
@@ -314,9 +281,9 @@ std::unique_ptr<DecodedFrame> SoftwareFrames::next() {
         if (result == AVERROR_EOF) { s.ended = true; return nullptr; }
         if (result == 0) {
             if (s.frame->flags & AV_FRAME_FLAG_DISCARD) continue;
-            const auto base = s.demux->streams[s.stream]->time_base;
+            const auto base = s.input.video_time_base();
             const auto pts = media_time(s.frame->pts, base, "video PTS");
-            if (CMTimeCompare(pts, s.info.video_range.start) < 0) continue;
+            if (CMTIME_IS_NUMERIC(s.info.video_range.start) && CMTimeCompare(pts, s.info.video_range.start) < 0) continue;
             if (CMTIME_IS_NUMERIC(s.last_pts) && CMTimeCompare(pts, s.last_pts) <= 0) {
                 throw std::runtime_error("Software decoded video PTS must strictly increase");
             }
@@ -329,20 +296,13 @@ std::unique_ptr<DecodedFrame> SoftwareFrames::next() {
         }
         s.check(result == AVERROR(EAGAIN) ? 0 : result, "avcodec_receive_frame [software]");
         if (s.draining) throw std::runtime_error("FFmpeg requested more input after decoder drain");
-        int read = 0;
-        do {
-            av_packet_unref(s.packet);
-            read = av_read_frame(s.demux, s.packet);
-            if (read == AVERROR_EOF) break;
-            s.check(read, "av_read_frame [video]");
-        } while (s.packet->stream_index != s.stream);
-        if (read == AVERROR_EOF) {
+        auto packet = s.input.read_video_packet();
+        if (!packet) {
             s.check(avcodec_send_packet(s.decoder, nullptr), "avcodec_send_packet [drain]");
             s.draining = true;
         } else {
-            if (s.packet->flags & AV_PKT_FLAG_CORRUPT) throw std::runtime_error("FFmpeg demux returned a corrupt video packet");
-            s.check(avcodec_send_packet(s.decoder, s.packet), "avcodec_send_packet [software]");
-            av_packet_unref(s.packet);
+            if (packet->flags & AV_PKT_FLAG_CORRUPT) throw std::runtime_error("FFmpeg demux returned a corrupt video packet");
+            s.check(avcodec_send_packet(s.decoder, packet.get()), "avcodec_send_packet [software]");
         }
     }
     return nullptr;

@@ -54,15 +54,16 @@ add_library(vtenc_apple STATIC
     src/apple/bob.cpp
     src/apple/gpu_filter.mm
     src/apple/source_format.cpp
-    src/apple/media_io.mm
+    src/apple/avformat_input.cpp
+    src/apple/avformat_output.cpp
     src/apple/bitstream_output.cpp
     src/apple/capability_probe.cpp
     src/apple/metal_device.mm)
 target_include_directories(vtenc_apple PUBLIC include PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-target_include_directories(vtenc_apple SYSTEM PRIVATE "${VTENC_FFMPEG_INCLUDE_DIR}")
+target_include_directories(vtenc_apple SYSTEM PUBLIC "${VTENC_FFMPEG_INCLUDE_DIR}")
 target_link_libraries(vtenc_apple PRIVATE vtenc_options
     "${VTENC_avformat_LIBRARY}" "${VTENC_avcodec_LIBRARY}" "${VTENC_avutil_LIBRARY}")
-foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox Foundation Metal AVFoundation)
+foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox Foundation Metal)
     find_library(VTENC_${framework}_LIBRARY ${framework} REQUIRED)
     target_link_libraries(vtenc_apple PRIVATE "${VTENC_${framework}_LIBRARY}")
 endforeach()

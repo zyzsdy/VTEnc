@@ -43,7 +43,7 @@ struct EncodeConfig {
     ProbeConfig video;
     DecodeMode decode = DecodeMode::automatic;
     FilterConfig filter;
-    std::string input; // Empty means synthetic input; otherwise tightly packed NV12/P010 LE.
+    std::string input; // Empty: synthetic. Raw jobs: NV12/P010 LE. Compressed jobs: avformat input.
     std::string output;
     std::int32_t frames = 120;
     std::int32_t fps_num = 30;

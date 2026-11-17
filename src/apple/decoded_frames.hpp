@@ -21,7 +21,7 @@ public:
 // Software-only libavcodec, fed by libavformat; owns its demux/decode state.
 class SoftwareFrames final : public DecodedFrames {
 public:
-    SoftwareFrames(const EncodeConfig& config, const MediaInfo& info,
+    SoftwareFrames(const EncodeConfig& config, ContainerInput& input,
                    const volatile std::sig_atomic_t& cancelled);
     ~SoftwareFrames() override;
     [[nodiscard]] std::unique_ptr<DecodedFrame> next() override;

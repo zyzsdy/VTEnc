@@ -11,7 +11,7 @@ endfunction()
 
 check_cli(0 "Usage:" "^$")
 check_cli(0 "VTEnc [0-9]+\\.[0-9]+\\.[0-9]+" "^$" --version)
-check_cli(0 "MP4/MOV: hardware-only encode" "^$" --help)
+check_cli(0 "Compressed input: avformat probes any format" "^$" --help)
 check_cli(2 "^$" "Unknown argument" --bogus)
 check_cli(2 "^$" "Missing value" --check-features --codec)
 check_cli(2 "^$" "Supported codecs" --check-features --codec av1)
@@ -51,7 +51,7 @@ check_cli(2 "^$" "stdin is not supported" -i - --input-res 320x180 --frames 17 -
 
 # Container jobs reject unsupported timeline overrides before any I/O.
 set(file_job -i input.mp4 -o output.mov)
-check_cli(2 "^$" "raw-only" ${file_job} --input-res 320x180)
+check_cli(2 "^$" "requires --frames" ${file_job} --input-res 320x180)
 check_cli(2 "^$" "raw-only" ${file_job} --fps 30)
 check_cli(2 "^$" "raw-only" ${file_job} --frames 10)
 check_cli(2 "^$" "mutually exclusive" ${file_job} --audio-copy --no-audio)
@@ -88,12 +88,18 @@ check_cli(2 "^$" "exceeds 32-bit range" -i raw.nv12 -o out.h264 --input-res 720x
 check_cli(2 "^$" "exceeds 32-bit range" -i raw.nv12 -o out.h264 --input-res 720x480 --frames 1 --fps 2147483647 --deinterlace bob --field-order tff)
 
 # Decode mode selection is explicit, exclusive and compressed-input only.
-check_cli(0 "--avhw: require hardware decoding" "^$" --help)
+check_cli(0 "--avhw: avformat demuxing, require hardware decoding" "^$" --help)
 check_cli(0 "--avsw: use FFmpeg" "^$" --help)
 check_cli(2 "^$" "mutually exclusive" ${file_job} --avhw --avsw)
 check_cli(2 "^$" "mutually exclusive" ${file_job} --avsw --avhw)
 check_cli(2 "^$" "Duplicate option" ${file_job} --avsw --avsw)
 check_cli(2 "^$" "Duplicate option" ${file_job} --avhw --avhw)
-check_cli(2 "^$" "require MP4/MOV compressed input" ${job} --avsw)
-check_cli(2 "^$" "require MP4/MOV compressed input" -i raw.nv12 -o out.h264 --input-res 320x180 --frames 1 --avhw)
+check_cli(2 "^$" "require compressed input" ${job} --avsw)
+check_cli(2 "^$" "require compressed input" -i raw.nv12 -o out.h264 --input-res 320x180 --frames 1 --avhw)
 check_cli(2 "^$" "cannot be combined" --check-features --avsw)
+
+# Every non-raw path is handed to avformat, including unfamiliar extensions.
+check_cli(1 "^$" "avformat_open_input" -i missing-input.mkv -o output.mp4 --avhw)
+check_cli(1 "^$" "avformat_open_input" -i missing-input.ts -o output.mp4 --avsw)
+check_cli(1 "^$" "avformat_open_input" -i missing-input.unlisted -o output.mov)
+check_cli(1 "^$" "avformat_open_input" -i missing-input -o output.mov)

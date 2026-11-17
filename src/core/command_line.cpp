@@ -178,7 +178,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (has_command) throw std::invalid_argument("Encoding options cannot be combined with a query command");
         result.command = Command::encode;
         if (synthetic == !result.encode.input.empty()) {
-            throw std::invalid_argument("Encoding requires exactly one source: --synthetic or -i raw-file");
+            throw std::invalid_argument("Encoding requires exactly one source: --synthetic or -i input-file");
         }
         if (result.encode.output.empty() || result.encode.output == "-") {
             throw std::invalid_argument("Encoding requires -o output-file (stdout is not supported)");
@@ -188,14 +188,15 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             return ext;
         };
-        const auto input_ext = extension(result.encode.input);
-        if (!synthetic && (input_ext == ".mp4" || input_ext == ".mov")) {
+        // Compressed input is probed by avformat, independent of its extension.
+        // --input-res explicitly selects the existing tightly packed raw path.
+        if (!synthetic && !seen.contains("--input-res")) {
             result.command = Command::transcode;
             const auto output_ext = extension(result.encode.output);
             if (output_ext != ".mp4" && output_ext != ".mov") {
                 throw std::invalid_argument("Container transcoding requires an .mp4 or .mov output");
             }
-            if (seen.contains("--input-res") || seen.contains("--frames") || seen.contains("--fps")) {
+            if (seen.contains("--frames") || seen.contains("--fps")) {
                 throw std::invalid_argument("Container transcoding reads source dimensions/timing; --input-res, --frames and --fps are raw-only");
             }
             if (seen.contains("--audio-copy") && seen.contains("--no-audio")) {
@@ -203,9 +204,9 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             }
         } else {
             if (seen.contains("--avhw") || seen.contains("--avsw")) {
-                throw std::invalid_argument("--avhw and --avsw require MP4/MOV compressed input");
+                throw std::invalid_argument("--avhw and --avsw require compressed input (without --input-res)");
             }
-            if (result.encode.filter.requested) throw std::invalid_argument("GPU filters require MP4/MOV input");
+            if (result.encode.filter.requested) throw std::invalid_argument("GPU filters require compressed input");
             if (!seen.contains("--input-res")) throw std::invalid_argument("Encoding requires --input-res WIDTHxHEIGHT");
             if (result.encode.filter.bob) {
                 if (synthetic) throw std::invalid_argument("Bob requires file input, not --synthetic");
@@ -218,10 +219,10 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             }
             if (!seen.contains("--frames")) throw std::invalid_argument("Encoding requires --frames COUNT");
             if (seen.contains("--audio-copy") || seen.contains("--no-audio")) {
-                throw std::invalid_argument("Audio options require MP4/MOV input");
+                throw std::invalid_argument("Audio options require compressed input");
             }
         }
-        if (result.encode.input == "-") throw std::invalid_argument("Raw input must be a regular file; stdin is not supported");
+        if (result.command == Command::encode && result.encode.input == "-") throw std::invalid_argument("Raw input must be a regular file; stdin is not supported");
         if (seen.contains("--bitrate") && seen.contains("--quality")) {
             throw std::invalid_argument("--bitrate and --quality are mutually exclusive");
         }
@@ -242,7 +243,7 @@ Usage:
   vtenc --version
   vtenc --check-device
   vtenc --check-features [--codec h264|hevc] [--output-depth 8|10]
-  vtenc -i input.mp4|input.mov -o output.mp4|output.mov
+  vtenc -i input-file -o output.mp4|output.mov
         [--avhw | --avsw]
         [--codec h264|hevc] [--output-depth 8|10] [--audio-copy | --no-audio]
         [--crop LEFT,TOP,RIGHT,BOTTOM] [--output-res WIDTHxHEIGHT]
@@ -267,12 +268,19 @@ P1 disables frame reordering. --quality is native VT Quality, not CRF/CQP.
 SIGINT drains submitted frames and discards the incomplete output (exit 130).
 Feature probing creates a hardware-only 1920x1080 VideoToolbox session.
 Listed properties are not validated value combinations; the probe encodes no frames.
-MP4/MOV: hardware-only encode, first audio track copied by default.
---avhw: require hardware decoding; any hardware decode failure is fatal.
+Compressed input: avformat probes any format; hardware-only encode.
+MP4/MOV output, first audio track copied by default.
+--input-res selects tightly packed raw input instead of avformat.
+--avhw: avformat demuxing, require hardware decoding; any hardware decode failure is fatal.
 --avsw: use FFmpeg libavformat demuxing and libavcodec software decoding.
 Default: try hardware decoding, then restart once with software decoding on a
-decoder failure. Encoder, filter and output failures never trigger a retry.
-PTS, VFR and display orientation are preserved. GPU filters use Metal only.
+replayable input after a decoder failure. Non-seekable input cannot be restarted;
+select --avsw in advance when hardware decoding is unavailable. Encoder, filter,
+demux and output failures never trigger a retry.
+Video PTS, VFR and display orientation are preserved. If the final frame duration
+is absent, the preceding display interval is used with a diagnostic (single-frame
+input without duration fails). Audio timestamp rounding to the output sampling
+clock is reported and bounded to half an audio tick. GPU filters use Metal only.
 Crop uses even margins in stored pixels, then bilinear resize to even output size.
 Output pixel aspect ratio is preserved; explicit output size may stretch the image.
 8/10-bit and range conversion are supported; depth follows --output-depth (default 8).
