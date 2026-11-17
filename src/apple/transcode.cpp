@@ -11,6 +11,8 @@
 #include "ffmpeg_utils.hpp"
 #include "timeline.hpp"
 #include "audio_transcode.hpp"
+#include "subtitle.hpp"
+#include "output_metadata.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -215,8 +217,10 @@ public:
             require_time(pts, "video PTS");
             // avformat supplies decode order. Some containers (notably Matroska)
             // omit initial DTS; never substitute reordered PTS for missing DTS.
+            collect_hdr_sei(sample.get(),hdr_.get());
             auto frame = decoder_.decode(sample.get());
             if (frame) {
+                CVBufferSetAttachments(frame->pixel.get(),hdr_.get(),kCVAttachmentMode_ShouldPropagate);
                 frame->cadence = cadence;
                 if (CMTIME_IS_NUMERIC(input_.info().video_range.start) && CMTimeCompare(frame->pts, input_.info().video_range.start) < 0) continue;
                 if (frames_.size() >= 32) throw std::runtime_error("Video reorder queue exceeds P2's 32-frame limit");
@@ -231,6 +235,7 @@ private:
     ContainerInput& input_;
     const volatile std::sig_atomic_t& cancelled_;
     HardwareDecoder decoder_;
+    CFRef<CFMutableDictionaryRef> hdr_{CFDictionaryCreateMutable(nullptr,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks)};
     bool read_cadence_;
     std::vector<std::unique_ptr<Frame>> frames_;
     CMTime last_pts_ = kCMTimeInvalid;
@@ -345,10 +350,32 @@ public:
         CMVideoFormatDescriptionRef raw = nullptr;
         check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr, pixel, &raw), "Describe processed encoder input");
         CFRef format(raw);
+        CFRetain(raw); pixel_metadata_.emplace(raw);
+        // Preserve track-level aperture/SAR for the existing unfiltered native
+        // path; processed/software frames describe their own output raster.
+        const auto metadata_source=processed_->filtered() || config_.decode==DecodeMode::software || config_.filter.ivtc.enabled
+            ? format.get() : input.info().video_format;
+        metadata_.emplace(output_format(config_,metadata_source,input.info().video_format,pixel));
+        if (!config_.subtitles.empty()) {
+            double sar=1.0;
+            if (config_.dar) {
+                const auto ratio=display_sar(*config_.dar,config_.video.width,config_.video.height,input.info().transform);
+                sar=static_cast<double>(ratio[0])/ratio[1];
+            } else if (auto value=CMFormatDescriptionGetExtension(raw,kCVImageBufferPixelAspectRatioKey)) {
+                if (CFGetTypeID(value)!=CFDictionaryGetTypeID()) throw std::runtime_error("Invalid subtitle SAR");
+                auto d=static_cast<CFDictionaryRef>(value); int x=0,y=0;
+                auto a=CFDictionaryGetValue(d,kCVImageBufferPixelAspectRatioHorizontalSpacingKey);
+                auto b=CFDictionaryGetValue(d,kCVImageBufferPixelAspectRatioVerticalSpacingKey);
+                if (!a||!b||CFGetTypeID(a)!=CFNumberGetTypeID()||CFGetTypeID(b)!=CFNumberGetTypeID()||
+                    !CFNumberGetValue(static_cast<CFNumberRef>(a),kCFNumberIntType,&x)||
+                    !CFNumberGetValue(static_cast<CFNumberRef>(b),kCFNumberIntType,&y)||x<=0||y<=0) throw std::runtime_error("Invalid subtitle SAR");
+                sar=static_cast<double>(x)/y;
+            }
+            subtitles_=std::make_unique<SubtitleRenderer>(config_.subtitles,config_.video.width,config_.video.height,sar);
+            compositor_=std::make_unique<GpuSubtitles>(pixel);
+        }
         create_hardware_session(session_, config_.video, &receive, this, CVPixelBufferGetPixelFormatType(pixel));
-        configure_hardware_encoder(session_.value, config_,
-            processed_->filtered() || config_.decode == DecodeMode::software || config_.filter.ivtc.enabled
-                ? format.get() : input.info().video_format);
+        configure_hardware_encoder(session_.value, config_, metadata_->get());
         if (config_.dar) {
             sar_ = display_sar(*config_.dar, config_.video.width, config_.video.height, input.info().transform);
             set_display_sar(session_.value, *sar_);
@@ -364,8 +391,18 @@ public:
         if (advance_) { current_.reset(); current_ = frames_->next(); }
         advance_ = true;
         if (!current_ || cancelled_) return nullptr;
-        const auto pixel = current_->pixel.get();
+        auto pixel = current_->pixel.get();
+        CMVideoFormatDescriptionRef current_format=nullptr;
+        check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr,pixel,&current_format),"Describe current output frame");
+        CFRef current_metadata(current_format);
+        verify_output_metadata(pixel_metadata_->get(),current_format);
+        std::optional<CFRef<CVPixelBufferRef>> composed;
         const auto pts = current_->pts, duration = current_->duration;
+        if (subtitles_) {
+            auto images=subtitles_->render(pts);
+            composed.emplace(compositor_->process(pixel,images,subtitles_->changed()));
+            pixel=composed->get();
+        }
         error_ = nullptr;
         output_.reset();
         VTEncodeInfoFlags flags = 0;
@@ -387,21 +424,16 @@ public:
             if (source_pixel_format(format) != CVPixelBufferGetPixelFormatType(pixel)) {
                 throw std::runtime_error("Encoder changed filtered bit depth or color range");
             }
-            for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey}) {
-                if (const auto raw = CVBufferCopyAttachment(pixel, key, nullptr)) {
-                    CFRef expected(raw);
-                    const auto actual = CMFormatDescriptionGetExtension(format, key);
-                    if (!actual || !CFEqual(actual, expected.get())) throw std::runtime_error("Encoder changed filtered color metadata");
-                }
-            }
             // H.264/HEVC default chroma siting is left when the location is omitted.
             if (const auto location = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_ChromaLocationTopField)) {
                 if (!CFEqual(location, kCMFormatDescriptionChromaLocation_Left)) throw std::runtime_error("Encoder changed filtered chroma location");
             }
         }
+        verify_output_metadata(metadata_->get(),CMSampleBufferGetFormatDescription(output_->get()));
         if (sar_) verify_display_sar(CMSampleBufferGetFormatDescription(output_->get()), *sar_);
-        CFRetain(output_->get());
-        return output_->get();
+        auto normalized=normalize_hdr_sei(output_->get(),metadata_->get());
+        CFRetain(normalized.get());
+        return normalized.get();
     }
     [[nodiscard]] std::int64_t gpu_frames() const { return processed_->gpu_frames(); }
     void finish() {
@@ -423,6 +455,9 @@ private:
         } catch (...) { self.error_ = std::current_exception(); }
     }
     CompressionSession session_;
+    std::optional<CFRef<CMVideoFormatDescriptionRef>> metadata_, pixel_metadata_;
+    std::unique_ptr<SubtitleRenderer> subtitles_;
+    std::unique_ptr<GpuSubtitles> compositor_;
     EncodeConfig config_;
     const volatile std::sig_atomic_t& cancelled_;
     std::unique_ptr<DecodedFrames> frames_;

@@ -31,27 +31,34 @@ foreach(component avformat avcodec avutil swresample)
     find_library(VTENC_${component}_LIBRARY NAMES ${component} REQUIRED)
 endforeach()
 
+find_path(VTENC_ASS_INCLUDE_DIR ass/ass.h REQUIRED)
+find_library(VTENC_ASS_LIBRARY NAMES ass REQUIRED)
+find_package(Freetype REQUIRED)
+
 add_library(vtenc_options INTERFACE)
 target_compile_options(vtenc_options INTERFACE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
     -Werror=unguarded-availability
     "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 
-add_library(vtenc_core STATIC src/core/command_line.cpp src/core/colorspace.cpp src/core/status.cpp)
+add_library(vtenc_core STATIC src/core/command_line.cpp src/core/colorspace.cpp src/core/status.cpp src/core/subtitle.cpp)
 target_include_directories(vtenc_core PUBLIC include)
 target_link_libraries(vtenc_core PRIVATE vtenc_options)
 
 # Embed source so installed CLI needs neither shader files nor the offline Metal compiler.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/apple/shaders/filter.metal src/apple/shaders/colorspace.metal src/apple/shaders/ivtc.metal)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/apple/shaders/filter.metal src/apple/shaders/colorspace.metal src/apple/shaders/ivtc.metal src/apple/shaders/subtitle.metal)
 file(READ src/apple/shaders/filter.metal VTENC_GPU_SHADER)
 file(READ src/apple/shaders/colorspace.metal VTENC_COLOR_SHADER)
 file(READ src/apple/shaders/ivtc.metal VTENC_IVTC_SHADER)
-string(APPEND VTENC_GPU_SHADER "\n${VTENC_IVTC_SHADER}")
+file(READ src/apple/shaders/subtitle.metal VTENC_SUBTITLE_SHADER)
+string(APPEND VTENC_GPU_SHADER "\n${VTENC_IVTC_SHADER}\n${VTENC_SUBTITLE_SHADER}")
 string(PREPEND VTENC_GPU_SHADER "${VTENC_COLOR_SHADER}\n")
 configure_file(src/apple/shaders/filter_shader.hpp.in generated/filter_shader.hpp @ONLY)
 
 add_library(vtenc_apple STATIC
     src/apple/encoder.cpp
+    src/apple/subtitle.cpp
+    src/apple/output_metadata.cpp
     src/apple/transcode.cpp
     src/apple/timeline.cpp
     src/apple/audio_transcode.cpp
@@ -72,8 +79,8 @@ add_library(vtenc_apple STATIC
     src/apple/capability_probe.cpp
     src/apple/metal_device.mm)
 target_include_directories(vtenc_apple PUBLIC include PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-target_include_directories(vtenc_apple SYSTEM PUBLIC "${VTENC_FFMPEG_INCLUDE_DIR}")
-target_link_libraries(vtenc_apple PRIVATE vtenc_options vtenc_core
+target_include_directories(vtenc_apple SYSTEM PUBLIC "${VTENC_FFMPEG_INCLUDE_DIR}" "${VTENC_ASS_INCLUDE_DIR}")
+target_link_libraries(vtenc_apple PRIVATE vtenc_options vtenc_core Freetype::Freetype "${VTENC_ASS_LIBRARY}"
     "${VTENC_avformat_LIBRARY}" "${VTENC_avcodec_LIBRARY}" "${VTENC_avutil_LIBRARY}" "${VTENC_swresample_LIBRARY}")
 foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox AudioToolbox Foundation Metal)
     find_library(VTENC_${framework}_LIBRARY ${framework} REQUIRED)
@@ -92,6 +99,11 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" -DVTENC=$<TARGET_FILE:vtenc>
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake")
     set_tests_properties(vtenc.cli PROPERTIES LABELS "cli" TIMEOUT 15)
+    add_executable(vtenc_output_metadata_test tests/output_metadata_test.cpp)
+    target_include_directories(vtenc_output_metadata_test PRIVATE src/apple)
+    target_link_libraries(vtenc_output_metadata_test PRIVATE vtenc_apple vtenc_options)
+    add_test(NAME vtenc.output-metadata COMMAND vtenc_output_metadata_test)
+    set_tests_properties(vtenc.output-metadata PROPERTIES LABELS "metadata" TIMEOUT 15)
     add_executable(vtenc_status_test tests/status_test.cpp)
     target_link_libraries(vtenc_status_test PRIVATE vtenc_core vtenc_options)
     add_test(NAME vtenc.status COMMAND vtenc_status_test)
@@ -112,6 +124,9 @@ if(BUILD_TESTING)
     add_test(NAME vtenc.colorspace COMMAND vtenc_colorspace_test)
     set_tests_properties(vtenc.colorspace PROPERTIES LABELS "colorspace" TIMEOUT 15)
     # Explicit hardware executable: intentionally excluded from default CTest.
+    add_executable(vtenc_subtitle_test tests/subtitle_hardware.cpp)
+    target_include_directories(vtenc_subtitle_test PRIVATE src/apple)
+    target_link_libraries(vtenc_subtitle_test PRIVATE vtenc_apple vtenc_options)
     add_executable(vtenc_gpu_filter_test tests/gpu_filter_hardware.cpp)
     target_include_directories(vtenc_gpu_filter_test PRIVATE src/apple)
     target_link_libraries(vtenc_gpu_filter_test PRIVATE vtenc_apple vtenc_options)

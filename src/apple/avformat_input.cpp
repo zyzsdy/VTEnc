@@ -1,4 +1,5 @@
 #include "cadence_parser.hpp"
+#include "output_metadata.hpp"
 #include "ffmpeg_utils.hpp"
 extern "C" {
 #include <libavutil/opt.h>
@@ -68,6 +69,7 @@ std::vector<Bytes> length_prefixed(Bytes bytes, unsigned length_size) {
 }
 CFRef<CFMutableDictionaryRef> metadata(const AVCodecParameters* p) {
     CFRef result(CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+    import_hdr_metadata(result.get(),p);
     const auto set = [&](CFStringRef key, CFTypeRef value) { if (value) CFDictionarySetValue(result.get(), key, value); };
     const auto number = [&](CFStringRef key, int value) {
         CFRef n(CFNumberCreate(nullptr, kCFNumberIntType, &value)); set(key, n.get());

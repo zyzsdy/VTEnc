@@ -1,3 +1,4 @@
+#include "output_metadata.hpp"
 #include "decoded_frames.hpp"
 #include "encoder_session.hpp"
 #include "gpu_filter.hpp"
@@ -94,7 +95,8 @@ struct SoftwareFrames::Impl {
         for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey,
                               kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey,
                               kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferPixelAspectRatioKey,
-                              kCVImageBufferCleanApertureKey}) {
+                              kCVImageBufferCleanApertureKey,kCMFormatDescriptionExtension_MasteringDisplayColorVolume,
+                              kCMFormatDescriptionExtension_ContentLightLevelInfo, source_light_key()}) {
             attach(key, CMFormatDescriptionGetExtension(info.video_format, key));
         }
         if (frame->color_primaries != AVCOL_PRI_UNSPECIFIED) {
@@ -145,6 +147,7 @@ struct SoftwareFrames::Impl {
             if (detail && CFEqual(detail, kCVImageBufferFieldDetailSpatialFirstLineLate)) detail = kCVImageBufferFieldDetailTemporalBottomFirst;
             attach(kCVImageBufferFieldDetailKey, detail);
         }
+        import_hdr_metadata(pixel,frame);
         const auto sar = frame->sample_aspect_ratio;
         if (sar.num > 0 && sar.den > 0) {
             CFRef horizontal(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &sar.num));

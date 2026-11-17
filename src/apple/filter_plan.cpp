@@ -1,4 +1,5 @@
 #include "gpu_filter.hpp"
+#include "output_metadata.hpp"
 #include "encoder_session.hpp"
 #include "vtenc/colorspace.hpp"
 
@@ -60,7 +61,7 @@ ColorPrimaries primaries_value(CFTypeRef value) {
 }
 
 bool needs_gpu_filter(const EncodeConfig& config, CVPixelBufferRef source) {
-    return config.filter.bob || config.filter.ivtc.enabled || config.filter.requested || describe(CVPixelBufferGetPixelFormatType(source)).depth != config.video.bit_depth;
+    return !config.subtitles.empty() || config.filter.bob || config.filter.ivtc.enabled || config.filter.requested || describe(CVPixelBufferGetPixelFormatType(source)).depth != config.video.bit_depth;
 }
 
 FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef format, CVPixelBufferRef source) {
@@ -93,10 +94,18 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
         ? (full ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
         : (full ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
     CFRef attachments(CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
-    // Whitelist semantic metadata; never carry stale aperture, codec or HDR attachments.
+    // Carry semantic metadata only. The scheduler validates static HDR applicability before encoding.
     for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey,
                           kCVImageBufferYCbCrMatrixKey, kCVImageBufferPixelAspectRatioKey}) {
         if (auto value = metadata(format, source_attachments.get(), key)) CFDictionarySetValue(attachments.get(), key, value);
+    }
+    // Keep original HDR evidence separately, never attach stale HDR labels to
+    // transformed pixels. The scheduler decides which evidence is applicable.
+    for (const auto pair : {std::pair{kCMFormatDescriptionExtension_MasteringDisplayColorVolume,source_master_key()},
+                            std::pair{kCMFormatDescriptionExtension_ContentLightLevelInfo,source_light_key()}}) {
+        auto value=metadata(format,source_attachments.get(),pair.second);
+        if (!value) value=metadata(format,source_attachments.get(),pair.first);
+        if (value) CFDictionarySetValue(attachments.get(),pair.second,value);
     }
     const auto transfer = metadata(format, source_attachments.get(), kCVImageBufferTransferFunctionKey);
     if (!config.filter.colorspace.enabled && transfer && (CFEqual(transfer, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) ||
@@ -232,7 +241,8 @@ void validate_filter_frame(const FilterPlan& plan, CVPixelBufferRef frame) {
     for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey,
                           kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey,
                           kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferFieldCountKey, kCVImageBufferFieldDetailKey,
-                          kCVImageBufferPixelAspectRatioKey, kCVImageBufferCleanApertureKey}) {
+                          kCVImageBufferPixelAspectRatioKey, kCVImageBufferCleanApertureKey,
+                          kCMFormatDescriptionExtension_MasteringDisplayColorVolume, kCMFormatDescriptionExtension_ContentLightLevelInfo, source_master_key(), source_light_key()}) {
         const auto expected = CFDictionaryGetValue(plan.source_attachments.get(), key);
         auto raw = CVBufferCopyAttachment(frame, key, nullptr);
         if (!raw) {

@@ -16,6 +16,7 @@
 - 平均码率目标或原生 Quality、GOP 上限、整数有理数帧率；Annex B 输出及逐帧时间戳 CSV。
 - 压缩输入统一交给 `libavformat` 自动探测，不设格式或扩展名白名单；支持实测 MKV、TS、WebM、MP4/MOV 等，探测失败直接报错。原生 VideoToolbox 硬解或 `libavcodec` 软解，原生硬编，avformat 根据输出文件名选择封装器，或由 `-f` / `--output-format` 显式指定；默认复制第一条音轨。
 - 文件转码将源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换传入封装器，精度与元数据保存取决于目标格式；支持 `hev1` 描述适配。
+- 外部 ASS/SSA 字幕：libass 排版／字形掩码、Metal 线性光合成与缓存、中文字体、偏移／透明度／裁剪／多层、SDR 8/10-bit 与 PQ/HLG。独立颜色标签及 HDR10 静态元数据策略见 P6。
 - Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709/BT.2020 NCL/SMPTE 240M 矩阵转换，以及 `--vpp-colorspace` 线性光色域、传递函数转换，以及 Hable / Mobius / Reinhard / BT.2390 HDR→SDR tone mapping。
 - Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010、硬解或软解的文件输入。两个原始交错样片在本机无法硬解，可用软解接入 Metal Bob。
 - P4 `--json-status` 版本化 JSON Lines 能力、进度与终态协议，或普通终端实时进度；编码日志统一 stderr，stdout 可独占码流。
@@ -34,12 +35,12 @@ P4 用法、JSON 字段、Y4M 颜色解释及生产者退出状态约定见 [P4 
 
 ```bash
 xcode-select --install  # 尚未安装 Xcode Command Line Tools 时执行
-brew install cmake ninja ffmpeg
+brew install cmake ninja ffmpeg libass freetype
 cd /Users/tedzy/Workspace/VTEnc
 ./scripts/bootstrap.sh
 ```
 
-`bootstrap.sh` 检查平台与工具并构建 Debug，不修改系统配置、不安装依赖、不自动运行测试。SDK 由 `xcode-select` / `xcrun` 选择，不在仓库中硬编码 SDK 路径。自定义 FFmpeg 安装可通过 `cmake --preset dev -DCMAKE_PREFIX_PATH=/your/ffmpeg/prefix` 指定。FFmpeg 的头文件和动态库必须来自同一安装；运行时需要保留这些动态库。实际可运行的最低 macOS 版本同时受 FFmpeg 库及其依赖的部署目标约束，本机 Homebrew FFmpeg 9.0.2 使用 macOS 27.0 部署目标，不能据此声称产物兼容 macOS 13。当前无需完整 Xcode；Metal Shader 源码嵌入可执行文件，运行时编译，失败直接报错。
+`bootstrap.sh` 检查平台与工具并构建 Debug，不修改系统配置、不安装依赖、不自动运行测试。SDK 由 `xcode-select` / `xcrun` 选择，不在仓库中硬编码 SDK 路径。自定义 FFmpeg 安装可通过 `cmake --preset dev -DCMAKE_PREFIX_PATH=/your/ffmpeg/prefix` 指定。FFmpeg 的头文件和动态库必须来自同一安装；运行时需要保留这些动态库。实际可运行的最低 macOS 版本同时受 FFmpeg 库及其依赖的部署目标约束，本机 Homebrew FFmpeg 9.0.2、libass 0.17.5 和 FreeType 2.15.0 使用 macOS 27.0 部署目标，不能据此声称产物兼容 macOS 13。当前无需完整 Xcode；Metal Shader 源码嵌入可执行文件，运行时编译，失败直接报错。
 
 也可以将构建工具安装到项目内隔离环境（本次环境初始化采用此方式）：
 
@@ -202,7 +203,7 @@ FFmpeg 来自外部安装，本仓库没有复制其上游实现。FFmpeg 的基
 
 视频 PTS 使用整数有理数传递，相邻 PTS 决定显示时长。TS 等容器可能没有末帧 duration：此时明确打印诊断并沿用前一个显示间隔；只有一帧且无 duration 时仍报错。音视频的输入时钟未必能精确映射到封装器选定的输出时钟（例如 MKV 常用 1/1000，TS 使用 1/90000）；写入时采用整数有理数就近舍入，误差不超过半个输出刻度，并首次打印换算诊断。可精确表示时不舍入；输出时钟若把不同视频帧的 PTS 或有效时长压成同一刻度，直接报错。封装器最终可保存的时长、旋转与边信息取决于格式；裸码流没有容器级时间戳。源音频 PTS 不递增、损坏包、流参数变化或目标封装失败均直接退出。
 
-当前限定一个视频轨；HDR 输入必须显式指定 `--vpp-colorspace`，交错输入必须显式启用 Bob。支持位深、尺寸和色彩空间转换；不支持 Dolby Vision、多音轨选择、字幕、章节与附件。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
+当前限定一个视频轨；HDR 输入必须显式指定 `--vpp-colorspace`，交错输入必须显式启用 Bob。支持位深、尺寸和色彩空间转换；不支持 Dolby Vision、多音轨选择、软字幕透传、章节与附件；外部 ASS/SSA 烧录见 P6。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
 
 本地文件任务取消或运行错误不发布成品，临时目录自动清理；成功写完 trailer、检查写入错误并关闭文件后，以不覆盖既有文件的方式发布。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
 
@@ -301,7 +302,7 @@ GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理
 
 与 NVEnc 一致，显示参考 BT.709 使用理想 BT.1886 gamma 2.4；`scene_ref=true` 切换为 BT.709 OETF。PQ 以 10000 cd/m² 归一化；HLG 显示参考采用 1000 cd/m²、gamma 1.2 的亮度相关 OOTF，场景参考采用逆/正 OETF 与 12 倍标度。HLG 在逆 OETF **之后**计算场景线性亮度并应用 OOTF，与参考版本对编码 RGB 先作亮度校正的顺序不同，保证正反变换互逆。PQ 输入负值及超过 1.0 的非法信号先限幅，避免有理式奇点；色域转换不做中间 RGB 限幅，传递函数按自身定义处理负值，最终输出超范围值裁切。
 
-当前没有移植 LUT3D、`approx_gamma` LUT 近似、RGB 平面、YCgCo、BT.2020 constant-luminance 或其他未列出的曲线/基色；请求这些参数会报错。未启用 `hdr2sdr` 时，HDR 转 SDR 不会自动压缩高光；HDR 输出只写转换后的矩阵、传递函数、基色和范围，不复制失效的 mastering display / content light 元数据，也不生成新的 HDR10 静态元数据。Dolby Vision 始终拒绝。编码器必须确认输出色彩标记，否则任务失败。
+当前没有移植 LUT3D、`approx_gamma` LUT 近似、RGB 平面、YCgCo、BT.2020 constant-luminance 或其他未列出的曲线/基色；请求这些参数会报错。未启用 `hdr2sdr` 时，HDR 转 SDR 不会自动压缩高光；HDR 输出的矩阵、传递函数、基色和范围随转换设置，静态 mastering display / content light 信息按 P6 的适用性策略保留、清除或显式设置。Dolby Vision 始终拒绝。编码器必须确认输出色彩标记，否则任务失败。
 
 ### HDR→SDR tone mapping
 
@@ -350,6 +351,55 @@ python3 tests/colorspace_hardware.py --tone-mapping
 ```
 
 2026-11-17 本机通过 980 个 GPU 像素用例；基础色彩转换验证了 6 个真实码流，tone mapping 追加验证了 9 个映射输出和 1 个裁切对照，见 [色彩空间验证记录](docs/色彩空间验证.md)。
+
+## P6：字幕、颜色标签与静态 HDR 元数据
+
+```bash
+# 外部 UTF-8 ASS / SSA；布局及字形光栅化由 libass 完成，图层及视频像素合成由 Metal 完成
+./build/dev/vtenc -i input.mkv -o subbed.mp4 --codec hevc \
+  --vpp-subburn 'filename=subtitles.ass,fontsdir=fonts,ts_offset=0.125,opacity=0.9'
+
+# 可重复传入，后面的字幕文件叠在前面之上；路径内的逗号需要内层引号
+./build/dev/vtenc -i input.mp4 -o layers.mp4 \
+  --vpp-subburn "filename='字幕,中文版.ass',fontfile=/path/to/font.otf" \
+  --vpp-subburn 'filename=signs.ass,clip=32:24:640:360'
+
+# PQ 字幕白明确为 203 cd/m²，HLG 使用同一 white 定义
+./build/dev/vtenc -i hdr10.mp4 -o subbed-hdr.mp4 --codec hevc --output-depth 10 \
+  --vpp-colorspace hdr2sdr=none --vpp-subburn 'filename=subtitles.ass,white=203'
+
+# 仅修改输出标签；像素转换仍使用 --vpp-colorspace
+./build/dev/vtenc -i input.mp4 -o tagged.mp4 \
+  --color-tags matrix=bt709,transfer=bt709,colorprim=bt709
+
+# 显式 HDR10 静态元数据，单位和顺序见下文；不猜测输入的 mastering display
+./build/dev/vtenc -i hdr10.mp4 -o explicit-hdr.mp4 --codec hevc --output-depth 10 \
+  --vpp-colorspace hdr2sdr=none \
+  --master-display 8500,39850,6550,2300,35400,14600,15635,16450,10000000,50 \
+  --max-cll 1000,400
+```
+
+字幕支持 avformat 文件输入和 `--avsw` Y4M 管道；原始 NV12/P010 / synthetic 路径不接受字幕及 P6 输出元数据参数，可改用 Y4M。只处理外部 ASS/SSA，不自动选择容器软字幕、提取内嵌字体或转换 SRT/位图字幕。最多 8 个字幕文件，ASS 内部的 Layer、样式、定位、动画、裁剪、描边和阴影由 libass 处理，严格按其返回的图像顺序合成。
+
+`fontsdir` 加载一层目录内的 TTF/OTF/TTC/OTC，`fontfile` 加载单个字体（两者可同时指定）。显式资源先检查可读性并用 FreeType 验证；无效或空字体目录、缺文件、无字幕事件、无法找到字形均报错。默认替代字体族为 `Arial`，可用 `font=族名` 修改；CoreText 按 ASS 样式找字体并进行字形级替代，实际选择和替代诊断写 stderr。字体选择与已安装字体有关，需要可重复结果时应提供相同字体资源。系统字体选择中的可恢复失败也保留诊断，不静默吞掉。
+
+处理顺序为解码 → IVTC／Bob → 裁剪、缩放、颜色及位深转换 → VFR／CFR → 字幕 → 输出标签／静态元数据 → VideoToolbox 硬编码。字幕按最终存储尺寸和最终 SAR 布局；`--dar` 覆盖也参与布局。显示旋转仍是封装元数据，会旋转整幅画面及字幕；本阶段不提供保持字幕朝向的物理旋转。
+
+字幕时钟为**绝对输出 PTS**，不自动减去第一帧或音轨起点。`ts_offset` 为有符号秒，最多三位小数；正数延后。先用整数有理数减去偏移，再向负无穷取整至 libass 毫秒时钟。ASS 的开始时刻包含、结束时刻不包含；CFR 重复画面也按各自输出 PTS 重新查询字幕。`opacity=0..1` 乘以 ASS 自带透明度；`clip=X:Y:W:H` 在最终存储像素上额外裁剪图层，允许奇数坐标。字幕文件内的裁剪和图层顺序仍有效。
+
+Metal 使用 RGBA32Float 缓存预乘线性光字幕图层，仅 libass 报告变化时重建；CPU 只上传字形覆盖掩码，不读取、混合或光栅化视频像素。SDR 字幕 RGB 按视频传递函数／基色解释，并遵循 ASS `YCbCr Matrix`（None、TV/PC.601、709、240M、FCC；缺省为 TV.601）。PQ／HLG 字幕统一视为 sRGB / BT.709，转换至输出基色；HDR 不采用旧式 YCbCr mangling。合成在线性显示光域完成，`white=1..1000` 指定字幕白的 cd/m²，默认 203。PQ 使用绝对亮度；HLG 明确采用 1000-nit 显示器、system gamma 1.2。SDR 的 `white` 不改变相对亮度。输出显式量化至 NV12/P010，色度采用 left siting，覆盖区域经水平 `[1,2,1]`、垂直双采样下采样；无覆盖的像素保留原值。无 GPU 或 GPU 执行失败直接报错，没有 CPU 视频合成回退。
+
+资源上限：每个字幕／字体文件 64 MiB、每字幕轨显式字体累计 256 MiB、字体目录最多 256 个字体文件、每帧掩码累计 256 MiB、RGBA32Float 图层 512 MiB（可容纳 7680×4320）。输出缓冲池有上限，一次一个 Metal command buffer。长片仍按帧流式处理，不缓存所有视频帧。
+
+`--color-tags` 只覆盖编码器和封装器的 matrix / transfer / colorprim，不参与上游像素计算，不接受 `auto` 或 FROM:TO。范围转换继续使用 `--output-range` 或 `--vpp-colorspace range=FROM:TO`，不提供伪装成仅标签的 range 操作。输出码流与请求的色彩标签不一致会失败。
+
+`--hdr-metadata auto|clear|preserve` 默认 auto：仅在 HEVC Main10、PQ / BT.2020 NCL，且原静态数据仍适用时保留。字幕、几何／场处理、CFR、颜色转换／源解释覆盖等可能使旧值失效；auto 清除并诊断，preserve 拒绝这类组合，或要求用显式值替换失效字段。HDR→SDR、HLG 或其他非 HDR10 输出不保留静态 HDR10 信息。`clear` 与显式设置互斥；未提供且源中不存在的数据保持不存在。流中变化的静态 HDR 元数据不支持，直接报错。
+
+`--master-display` 是 `Gx,Gy,Bx,By,Rx,Ry,Wx,Wy,maxL,minL` 的十个整数，色度坐标以 0.00002 为单位，亮度以 0.0001 cd/m² 为单位；`--max-cll` 是 `MaxCLL,MaxFALL`，单位 cd/m²。输入数值验证后以标准大端 SEI 布局传给 VideoToolbox；对硬件压缩包中的静态 HDR SEI 再按最终策略整理，在同步帧前写入所需值。这样可保留 CoreVideo 会省略的全零 Content Light 信息，并确保 clear 不残留旧 SEI；不改动压缩图像数据。硬解路径读取源 HEVC SEI，软解路径读取 AVFrame side data；对适用的封装器同时提供静态 side data。
+
+参数集策略不依赖用户维护格式白名单：原始 / synthetic Annex B 写入器在每个同步帧前写 SPS/PPS（HEVC 加 VPS）；avformat 输出向封装器提供 avcC/hvcC 和带长度前缀的包，由封装器及其自动 bitstream filter 按格式处理。H.264/HEVC 裸流和 TS 的同步帧重复参数集；MP4/MOV 使用配置记录，HEVC 在支持时使用 hvc1，不强行插入 in-band 参数集。stdout 与文件采用相同封装规则，仍必须显式 `-f`，开始写出后不允许从头重试。
+
+本机验收与限制见 [P6 验证](docs/P6验证.md)。这不是 NVEnc `--vpp-subburn` 全参数兼容，也不代表所有 Apple Silicon 或旧 macOS 已验证。
 
 ## P3 Bob 反交错
 

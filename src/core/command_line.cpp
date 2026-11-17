@@ -1,5 +1,6 @@
 #include "vtenc/command_line.hpp"
 #include "vtenc/colorspace.hpp"
+#include "vtenc/subtitle.hpp"
 
 #include <charconv>
 #include <cmath>
@@ -90,7 +91,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (arg == "--input") arg = "-i";
         if (arg == "--output") arg = "-o";
         if (arg == "-f") arg = "--output-format";
-        if (!seen.insert(arg).second) throw std::invalid_argument("Duplicate option: " + std::string(arg));
+        if (arg != "--vpp-subburn" && !seen.insert(arg).second) throw std::invalid_argument("Duplicate option: " + std::string(arg));
         if (arg == "--help" || arg == "--version" || arg == "--check-device" || arg == "--check-features") {
             if (has_command) throw std::invalid_argument("Specify exactly one command");
             has_command = true;
@@ -126,7 +127,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (!common && arg != "--output-format" && arg != "-i" && arg != "-o" && arg != "--input-res" && arg != "--fps" &&
             arg != "--avsync" && arg != "--dar" && arg != "--audio-codec" && arg != "--audio-bitrate" && arg != "--audio-samplerate" &&
             arg != "--frames" && arg != "--gop-len" && arg != "--bitrate" && arg != "--quality" &&
-            arg != "--vpp-colorspace" && arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
+            arg != "--vpp-subburn" && arg != "--color-tags" && arg != "--hdr-metadata" && arg != "--master-display" && arg != "--max-cll" && arg != "--vpp-colorspace" && arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
             arg != "--input-matrix" && arg != "--output-matrix" && arg != "--input-chroma-loc" && arg != "--deinterlace" && arg != "--field-order") {
             throw std::invalid_argument("Unknown argument: " + std::string(arg));
         }
@@ -148,6 +149,36 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         else if (arg == "--output-format") {
             if (value.starts_with("-")) throw std::invalid_argument("Missing value for --output-format");
             result.encode.output_format = value;
+        } else if (arg == "--vpp-subburn") {
+            if (result.encode.subtitles.size() >= 8) throw std::invalid_argument("At most eight subtitle layers are supported");
+            result.encode.subtitles.push_back(parse_subburn(value));
+        } else if (arg == "--color-tags") {
+            parse_color_tags(value, result.encode.color_tags);
+        } else if (arg == "--hdr-metadata") {
+            if (value == "auto") result.encode.hdr.mode = HdrMetadataMode::automatic;
+            else if (value == "clear") result.encode.hdr.mode = HdrMetadataMode::clear;
+            else if (value == "preserve") result.encode.hdr.mode = HdrMetadataMode::preserve;
+            else throw std::invalid_argument("--hdr-metadata requires auto, clear or preserve");
+        } else if (arg == "--master-display" || arg == "--max-cll") {
+            const auto count = arg == "--master-display" ? 10U : 2U;
+            std::array<std::uint32_t, 10> numbers{}; auto rest = value;
+            for (unsigned n=0; n<count; ++n) {
+                auto comma=rest.find(','); auto part=rest.substr(0,comma);
+                auto [end,ec]=std::from_chars(part.data(),part.data()+part.size(),numbers[n]);
+                const auto limit = count==2 ? 65535U : n<8 ? 50000U : 100000000U;
+                if (ec!=std::errc{}||end!=part.data()+part.size()||numbers[n]>limit||((n+1<count)!=(comma!=std::string_view::npos)))
+                    throw std::invalid_argument("Invalid HDR metadata integer list: " + std::string(arg));
+                if (n+1<count) rest.remove_prefix(comma+1);
+            }
+            if (count==10) {
+                if (!numbers[8] || numbers[9]>=numbers[8]) throw std::invalid_argument("Mastering max luminance must exceed min luminance");
+                for (unsigned n=0;n<8;n+=2) if (numbers[n]+numbers[n+1]>50000 || !numbers[n+1])
+                    throw std::invalid_argument("Invalid mastering chromaticity coordinates");
+                result.encode.hdr.mastering=numbers;
+            } else {
+                if (numbers[0] && numbers[1]>numbers[0]) throw std::invalid_argument("MaxFALL exceeds MaxCLL");
+                result.encode.hdr.light=std::array<std::uint16_t,2>{static_cast<std::uint16_t>(numbers[0]),static_cast<std::uint16_t>(numbers[1])};
+            }
         } else if (arg == "--vpp-colorspace") {
             parse_colorspace(value, result.encode.filter);
         } else if (arg == "--deinterlace") {
@@ -269,6 +300,8 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         throw std::invalid_argument("--audio-copy, --no-audio and --audio-codec are mutually exclusive");
     if ((seen.contains("--audio-bitrate") || seen.contains("--audio-samplerate")) && !result.encode.aac_audio)
         throw std::invalid_argument("--audio-bitrate/--audio-samplerate require --audio-codec aac");
+    if (result.encode.hdr.mode == HdrMetadataMode::clear && (result.encode.hdr.mastering || result.encode.hdr.light))
+        throw std::invalid_argument("--hdr-metadata clear conflicts with explicit HDR metadata");
     if (encode_options) {
         if (has_command) throw std::invalid_argument("Encoding options cannot be combined with a query command");
         result.command = Command::encode;
@@ -299,6 +332,8 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
                 throw std::invalid_argument("--avhw and --avsw require compressed input (without --input-res)");
             }
             if (result.encode.filter.ivtc.enabled) throw std::invalid_argument("--vpp-ivtc requires compressed input");
+            if (!result.encode.subtitles.empty() || result.encode.color_tags.enabled || seen.contains("--hdr-metadata") || result.encode.hdr.mastering || result.encode.hdr.light)
+                throw std::invalid_argument("Subtitle and output metadata options require avformat input (Y4M with --avsw is supported)");
             if (result.encode.filter.requested) throw std::invalid_argument("GPU filters require compressed input");
             if (!seen.contains("--input-res")) throw std::invalid_argument("Encoding requires --input-res WIDTHxHEIGHT");
             if (result.encode.filter.bob) {
@@ -347,6 +382,11 @@ Usage:
         [--output-range limited|full] [--output-matrix bt601|bt709|bt2020nc|smpte240m]
         [--input-matrix bt601|bt709|bt2020nc|smpte240m] [--input-chroma-loc left|center|top-left]
         [--vpp-colorspace KEY=VALUE[,KEY=VALUE]...]
+        [--vpp-subburn filename=ASS[,fontsdir=DIR,fontfile=FONT,font=Arial,
+                       ts_offset=SECONDS,opacity=0..1,white=NITS,clip=X:Y:W:H]]
+        [--color-tags matrix=NAME,transfer=NAME,colorprim=NAME]
+        [--hdr-metadata auto|clear|preserve] [--master-display INTEGER_LIST]
+        [--max-cll MaxCLL,MaxFALL]
         [--deinterlace bob | --vpp-ivtc [PARAMS]] [--field-order auto|tff|bff]
         [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
@@ -412,6 +452,23 @@ Output pixel aspect ratio is preserved; explicit output size may stretch the ima
 8/10-bit and range conversion are supported; depth follows --output-depth (default 8).
 Matrix conversion changes YCbCr coefficients only, preserving primaries and transfer.
 Missing matrix/chroma metadata requires an explicit input override when needed.
+--vpp-subburn is repeatable (up to 8, later layers on top). External UTF-8
+ASS/SSA only. libass shapes/rasterizes glyph masks; Metal caches and composites
+in display-linear RGB. Geometry/field processing/CFR precede subtitles. Layout
+uses final stored dimensions and SAR; display rotation rotates subtitles too.
+PTS is absolute output PTS (floor to milliseconds); positive ts_offset delays.
+ASS clipping/layers are honored; clip adds a final-pixel rectangle. Quote paths
+containing commas inside the argument. Fonts are validated; fallback selections
+are diagnosed, missing glyphs fail. SDR follows video transfer/primaries and ASS
+YCbCr Matrix; HDR subtitle colors are sRGB/BT.709 and white defaults
+to 203 cd/m2, PQ is absolute and HLG uses a 1000-nit display / system gamma 1.2.
+--color-tags changes only output matrix/transfer/primaries labels after filters;
+it does not change pixel values. Range conversion remains --output-range.
+HDR metadata auto preserves only applicable HDR10 values, clears stale values;
+preserve errors if a transform invalidates values. Explicit values require HEVC
+Main10 PQ/BT.2020 output. --master-display takes Gx,Gy,Bx,By,Rx,Ry,Wx,Wy,maxL,minL
+in 0.00002 chromaticity / 0.0001 cd/m2 units, without guessing defaults.
+
 --vpp-colorspace uses NVEnc-style matrix=FROM:TO,transfer=FROM:TO,
 colorprim=FROM:TO,range=FROM:TO pairs. Source auto reads frame/track metadata;
 destination auto preserves the resolved source (hdr2sdr defaults to BT.709).

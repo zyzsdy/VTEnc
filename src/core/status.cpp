@@ -79,6 +79,23 @@ std::string configuration_json(const EncodeConfig& c, bool transcode) {
       << ",\"audio_sample_rate\":" << (c.audio_sample_rate ? std::to_string(c.audio_sample_rate) : "null")
       << ",\"gop\":" << c.gop << ",\"bitrate\":" << (c.quality ? "null" : std::to_string(c.bitrate)) << ",\"quality\":";
     if (c.quality) s << *c.quality; else s << "null";
+    s << ",\"subtitles\":[";
+    for (std::size_t i=0;i<c.subtitles.size();++i) {
+        const auto& sub=c.subtitles[i]; if (i) s << ',';
+        s << "{\"filename\":" << json_string(sub.filename) << ",\"fontsdir\":" << json_string(sub.fontsdir)
+          << ",\"fontfile\":" << json_string(sub.fontfile) << ",\"font\":" << json_string(sub.font)
+          << ",\"offset_ms\":" << sub.offset_ms << ",\"opacity\":" << sub.opacity << ",\"white_nits\":" << sub.white_nits
+          << ",\"clip\":";
+        if (sub.clip) s << '[' << (*sub.clip)[0] << ',' << (*sub.clip)[1] << ',' << (*sub.clip)[2] << ',' << (*sub.clip)[3] << ']'; else s << "null";
+        s << '}';
+    }
+    s << "],\"color_tags\":{\"enabled\":" << c.color_tags.enabled << ",\"matrix\":" << static_cast<int>(c.color_tags.matrix)
+      << ",\"transfer\":" << static_cast<int>(c.color_tags.transfer) << ",\"primaries\":" << static_cast<int>(c.color_tags.primaries)
+      << "},\"hdr_metadata\":{\"mode\":" << static_cast<int>(c.hdr.mode) << ",\"mastering\":";
+    if (c.hdr.mastering) { s << '['; for (unsigned i=0;i<10;++i) { if (i) s << ','; s << (*c.hdr.mastering)[i]; } s << ']'; } else s << "null";
+    s << ",\"light\":";
+    if (c.hdr.light) s << '[' << (*c.hdr.light)[0] << ',' << (*c.hdr.light)[1] << ']'; else s << "null";
+    s << '}';
     s << ",\"require_hardware_encoder\":true,\"frame_reordering\":false,\"realtime\":false,\"filter\":{\"requested\":" << f.requested
       << ",\"bob\":" << f.bob << ",\"field_order\":" << static_cast<int>(f.field_order)
       << ",\"output_size\":";
@@ -206,7 +223,7 @@ void StatusReporter::capabilities(const EncoderCapabilities& c, std::string_view
     for (std::size_t i = 0; i < c.property_names.size(); ++i) { if (i) s << ','; s << json_string(c.property_names[i]); }
     s << "],\"features\":{\"json_status\":\"available\",\"y4m_420_8_10\":\"available_requires_avsw\","
          "\"software_video_encoding\":\"unsupported_by_design\",\"other_encode_configurations\":\"unverified\","
-         "\"cfr\":\"available_requires_explicit_fps\",\"dar_override\":\"available_orthogonal_transform\",\"aac_transcode\":\"available_audiotoolbox_lc_mono_stereo_44100_48000_file_output\",\"subtitle_burn\":\"not_implemented\"}";
+         "\"cfr\":\"available_requires_explicit_fps\",\"dar_override\":\"available_orthogonal_transform\",\"aac_transcode\":\"available_audiotoolbox_lc_mono_stereo_44100_48000_file_output\",\"subtitle_burn\":\"available_external_ass_ssa_libass_metal_sdr_pq_hlg\",\"color_tags\":\"available_labels_only\",\"hdr_static_metadata\":\"available_hdr10_applicability_checked\",\"parameter_sets\":\"container_specific_annexb_sync_headers\"}";
     event("capabilities", s.str());
 }
 DiagnosticBuffer::~DiagnosticBuffer() { if (!pending_.empty()) reporter_.diagnostic(pending_); }

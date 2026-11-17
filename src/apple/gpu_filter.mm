@@ -1,4 +1,7 @@
 #include "gpu_filter.hpp"
+#include "subtitle.hpp"
+#include "output_metadata.hpp"
+#include "vtenc/colorspace.hpp"
 #include "ivtc.hpp"
 #include "encoder_session.hpp"
 #include "filter_shader.hpp"
@@ -136,7 +139,8 @@ struct GpuIvtc::Impl {
         // Field flags may change in hard telecine. Color/geometry may not.
         for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey,
              kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey,
-             kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferPixelAspectRatioKey, kCVImageBufferCleanApertureKey}) {
+             kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferPixelAspectRatioKey, kCVImageBufferCleanApertureKey,
+             kCMFormatDescriptionExtension_MasteringDisplayColorVolume, kCMFormatDescriptionExtension_ContentLightLevelInfo, source_master_key(), source_light_key()}) {
             const auto expected = metadata ? CFDictionaryGetValue(metadata->get(), key) : nullptr;
             auto raw = CVBufferCopyAttachment(pixel, key, nullptr);
             if (raw) {
@@ -311,7 +315,8 @@ struct GpuFieldPair::Impl {
             throw std::runtime_error("HEVC single-field pixel layout changed during pairing");
         for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey,
              kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey,
-             kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferPixelAspectRatioKey, kCVImageBufferCleanApertureKey}) {
+             kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferPixelAspectRatioKey, kCVImageBufferCleanApertureKey,
+             kCMFormatDescriptionExtension_MasteringDisplayColorVolume, kCMFormatDescriptionExtension_ContentLightLevelInfo, source_master_key(), source_light_key()}) {
             const auto expected = metadata ? CFDictionaryGetValue(metadata->get(), key) : nullptr;
             auto raw = CVBufferCopyAttachment(pixel, key, nullptr);
             if (raw) {
@@ -397,6 +402,119 @@ CFRef<CVPixelBufferRef> GpuFieldPair::process(CVPixelBufferRef first, CVPixelBuf
         }
         [command commit]; [command waitUntilCompleted];
         if (command.status != MTLCommandBufferStatusCompleted) metal_error("Execute HEVC field pairing", command.error);
+        return output;
+    }
+}
+struct GpuSubtitles::Impl {
+    SubtitleParameters parameters{};
+    FilterPlan plan;
+    CFRef<CVPixelBufferPoolRef> pool;
+    std::optional<CFRef<CVMetalTextureCacheRef>> cache;
+    id<MTLDevice> device;
+    id<MTLCommandQueue> queue;
+    id<MTLComputePipelineState> clear, glyph, blend;
+    id<MTLTexture> overlay;
+    bool initialized=false;
+    static FilterPlan describe(CVPixelBufferRef source) {
+        CMVideoFormatDescriptionRef raw=nullptr;
+        check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr,source,&raw),"Describe subtitle canvas");
+        CFRef format(raw);
+        EncodeConfig c;
+        const auto type=CVPixelBufferGetPixelFormatType(source);
+        const bool ten=type==kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange||type==kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+        c.video.bit_depth=ten?10:8;
+        c.filter.colorspace.enabled=true;
+        return make_filter_plan(c,raw,source);
+    }
+    explicit Impl(CVPixelBufferRef source):plan(describe(source)),pool(make_filter_pool(plan)) {
+        const auto& f=plan.parameters;
+        auto& p=parameters;
+        p.storage=f.input_storage; p.y_offset=f.input_y_offset; p.y_scale=f.input_y_scale;
+        p.c_offset=f.input_c_offset; p.c_scale=f.input_c_scale; p.output_storage=f.output_storage; p.maximum=f.output_max;
+        p.kr=f.input_kr; p.kb=f.input_kb; p.transfer=f.input_transfer;
+        if (p.kr<=0 || p.kb<=0 || p.transfer==2) throw std::runtime_error("Subtitles require known matrix/transfer; set source interpretation with --vpp-colorspace");
+        const auto v=CFDictionaryGetValue(plan.attachments.get(),kCVImageBufferColorPrimariesKey);
+        if (!v) throw std::runtime_error("Subtitles require known primaries; use --vpp-colorspace colorprim=FROM:auto");
+        const auto prim=static_cast<ColorPrimaries>(CVColorPrimariesGetIntegerCodePointForString(static_cast<CFStringRef>(v)));
+        const auto gamut=gamut_matrix(ColorPrimaries::bt709,prim); const auto luma=primaries_luma(prim);
+        std::copy(gamut.begin(),gamut.end(),p.gamut); std::copy(luma.begin(),luma.end(),p.luma);
+        // Keep SAR, aperture, HDR metadata and source chroma; subtitle processing
+        // does not reinterpret any attachment. Input must already be left-sited.
+        if (f.chroma_x!=0.5F || f.chroma_y!=1.0F) throw std::runtime_error("Subtitle canvas requires left chroma; request --input-chroma-loc to resample first");
+
+    }
+    void dispatch(id<MTLComputeCommandEncoder> e,id<MTLComputePipelineState> p,int w,int h) {
+        const auto x=p.threadExecutionWidth;
+        [e dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(w),static_cast<NSUInteger>(h),1)
+            threadsPerThreadgroup:MTLSizeMake(x,std::min<NSUInteger>(8,p.maxTotalThreadsPerThreadgroup/x),1)];
+        [e endEncoding];
+    }
+};
+GpuSubtitles::GpuSubtitles(CVPixelBufferRef source):impl_(std::make_unique<Impl>(source)) {
+    @autoreleasepool {
+        auto& s=*impl_;
+        s.device=MTLCreateSystemDefaultDevice(); if (!s.device) metal_error("Create subtitle Metal device",nil);
+        s.queue=[s.device newCommandQueue]; if (!s.queue) metal_error("Create subtitle command queue",nil);
+        MTLCompileOptions* options=[[MTLCompileOptions alloc] init];
+        options.languageVersion=MTLLanguageVersion2_4; options.fastMathEnabled=NO;
+        NSError* error=nil;
+        auto lib=[s.device newLibraryWithSource:[NSString stringWithUTF8String:filter_shader_source] options:options error:&error];
+        if (!lib) metal_error("Compile subtitle Metal kernels",error);
+        const auto pipeline=[&](NSString* name) {
+            auto fn=[lib newFunctionWithName:name]; if (!fn) metal_error("Load subtitle kernel",nil);
+            auto p=[s.device newComputePipelineStateWithFunction:fn error:&error];
+            if (!p) metal_error("Create subtitle pipeline",error); return p;
+        };
+        s.clear=pipeline(@"subtitle_clear"); s.glyph=pipeline(@"subtitle_glyph"); s.blend=pipeline(@"subtitle_blend");
+        if (static_cast<std::uint64_t>(s.plan.width)*static_cast<std::uint64_t>(s.plan.height)*16>512*1024*1024)
+            throw std::runtime_error("Subtitle RGBA32Float canvas exceeds 512 MiB");
+        auto desc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+            width:static_cast<NSUInteger>(s.plan.width) height:static_cast<NSUInteger>(s.plan.height) mipmapped:NO];
+        desc.storageMode=MTLStorageModePrivate; desc.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;
+        s.overlay=[s.device newTextureWithDescriptor:desc]; if (!s.overlay) metal_error("Allocate subtitle overlay",nil);
+        CVMetalTextureCacheRef raw=nullptr;
+        check_status(CVMetalTextureCacheCreate(nullptr,nullptr,s.device,nullptr,&raw),"Create subtitle texture cache"); s.cache.emplace(raw);
+    }
+}
+GpuSubtitles::~GpuSubtitles()=default;
+CFRef<CVPixelBufferRef> GpuSubtitles::process(CVPixelBufferRef source,std::span<const SubtitleBitmap> images,bool changed) {
+    @autoreleasepool {
+        auto& s=*impl_;
+        validate_filter_frame(s.plan,source);
+        if (images.empty()) { s.initialized=false; CFRetain(source); return CFRef(source); }
+        auto command=[s.queue commandBuffer]; if (!command) metal_error("Create subtitle command buffer",nil);
+        command.label=@"VTEnc libass masks / Metal linear-light composition";
+        const auto encoder=[&](id<MTLComputePipelineState> p) {
+            auto e=[command computeCommandEncoder]; if (!e) metal_error("Create subtitle encoder",nil);
+            [e setComputePipelineState:p]; return e;
+        };
+        if (changed||!s.initialized) {
+            auto clear=encoder(s.clear); [clear setTexture:s.overlay atIndex:0]; s.dispatch(clear,s.clear,s.plan.width,s.plan.height);
+            std::size_t total=0;
+            for (const auto& image:images) {
+                // Last libass row has only width bytes, not stride bytes.
+                const auto bytes=static_cast<std::size_t>(image.height-1)*static_cast<std::size_t>(image.stride)+static_cast<std::size_t>(image.width);
+                total+=bytes; if (total>256*1024*1024) throw std::runtime_error("Subtitle masks exceed 256 MiB per frame");
+                auto mask=[s.device newBufferWithBytes:image.data length:bytes options:MTLResourceStorageModeShared];
+                if (!mask) metal_error("Upload libass alpha mask",nil);
+                struct Glyph { int x,y,w,h; unsigned stride,color; float opacity,white; int cx,cy,cw,ch; unsigned matrix; };
+                Glyph g{image.x,image.y,image.width,image.height,static_cast<unsigned>(image.stride),image.color,image.opacity,image.white_nits,
+                    image.clip[0],image.clip[1],image.clip[2],image.clip[3],image.color_matrix};
+                auto e=encoder(s.glyph); [e setTexture:s.overlay atIndex:0]; [e setBuffer:mask offset:0 atIndex:0];
+                [e setBytes:&g length:sizeof(g) atIndex:1]; [e setBytes:&s.parameters length:sizeof(s.parameters) atIndex:2];
+                s.dispatch(e,s.glyph,image.width,image.height);
+            }
+            s.initialized=true;
+        }
+        auto output=make_filter_buffer(s.pool.get(),s.plan);
+        std::array textures{texture(s.cache->get(),source,0,false),texture(s.cache->get(),source,1,false),
+            texture(s.cache->get(),output.get(),0,true),texture(s.cache->get(),output.get(),1,true)};
+        auto e=encoder(s.blend);
+        for (std::size_t i=0;i<textures.size();++i) [e setTexture:CVMetalTextureGetTexture(textures[i].get()) atIndex:i];
+        [e setTexture:s.overlay atIndex:4]; [e setBytes:&s.parameters length:sizeof(s.parameters) atIndex:0];
+        s.dispatch(e,s.blend,s.plan.width,s.plan.height);
+        [command commit]; [command waitUntilCompleted];
+        if (command.status!=MTLCommandBufferStatusCompleted) metal_error("Execute subtitle Metal composition",command.error);
         return output;
     }
 }

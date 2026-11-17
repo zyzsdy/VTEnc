@@ -120,6 +120,8 @@ inline void configure_hardware_encoder(VTCompressionSessionRef session, const En
             {kCMFormatDescriptionExtension_TransferFunction, kVTCompressionPropertyKey_TransferFunction, "TransferFunction"},
             {kCMFormatDescriptionExtension_YCbCrMatrix, kVTCompressionPropertyKey_YCbCrMatrix, "YCbCrMatrix"},
             {kCMFormatDescriptionExtension_PixelAspectRatio, kVTCompressionPropertyKey_PixelAspectRatio, "PixelAspectRatio"},
+            {kCMFormatDescriptionExtension_MasteringDisplayColorVolume, kVTCompressionPropertyKey_MasteringDisplayColorVolume, "MasteringDisplayColorVolume"},
+            {kCMFormatDescriptionExtension_ContentLightLevelInfo, kVTCompressionPropertyKey_ContentLightLevelInfo, "ContentLightLevelInfo"},
             {kCMFormatDescriptionExtension_CleanAperture, kVTCompressionPropertyKey_CleanAperture, "CleanAperture"},
         };
         for (const auto& key : keys) {

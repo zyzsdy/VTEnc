@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <vector>
 #include <span>
 #include <cstdint>
 #include <optional>
@@ -74,6 +75,27 @@ struct FilterConfig {
     bool requested = false;
 };
 
+struct SubtitleConfig {
+    std::string filename, fontsdir, fontfile;
+    std::string font = "Arial"; // Explicit fallback family; selections are diagnosed.
+    std::int64_t offset_ms = 0; // Positive delays subtitles on the output PTS clock.
+    float opacity = 1.0F, white_nits = 203.0F;
+    std::optional<std::array<int, 4>> clip; // x:y:width:height in final stored pixels.
+};
+struct ColorTags {
+    ColorMatrix matrix = ColorMatrix::automatic;
+    ColorTransfer transfer = ColorTransfer::automatic;
+    ColorPrimaries primaries = ColorPrimaries::automatic;
+    bool enabled = false;
+};
+enum class HdrMetadataMode { automatic, clear, preserve };
+struct HdrMetadataConfig {
+    HdrMetadataMode mode = HdrMetadataMode::automatic;
+    // HEVC SEI wire units: Gx,Gy,Bx,By,Rx,Ry,Wx,Wy,maxL,minL; MaxCLL,MaxFALL.
+    std::optional<std::array<std::uint32_t, 10>> mastering;
+    std::optional<std::array<std::uint16_t, 2>> light;
+};
+
 class StatusReporter;
 
 struct EncodeConfig {
@@ -81,6 +103,9 @@ struct EncodeConfig {
     ProbeConfig video;
     DecodeMode decode = DecodeMode::automatic;
     FilterConfig filter;
+    std::vector<SubtitleConfig> subtitles;
+    ColorTags color_tags;
+    HdrMetadataConfig hdr;
     std::string input; // Empty: synthetic. Raw jobs: NV12/P010 LE. Compressed jobs: avformat input.
     std::string output;
     std::string output_format; // Empty: avformat guesses from the destination filename.

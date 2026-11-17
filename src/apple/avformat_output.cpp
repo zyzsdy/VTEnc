@@ -1,3 +1,4 @@
+#include "output_metadata.hpp"
 #include "ffmpeg_utils.hpp"
 #include "cf_ref.hpp"
 #include "encoder_session.hpp"
@@ -223,6 +224,7 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
     if (const auto value = get(kCVImageBufferColorPrimariesKey)) p->color_primaries = static_cast<AVColorPrimaries>(CVColorPrimariesGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
     if (const auto value = get(kCVImageBufferTransferFunctionKey)) p->color_trc = static_cast<AVColorTransferCharacteristic>(CVTransferFunctionGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
     if (const auto value = get(kCVImageBufferYCbCrMatrixKey)) p->color_space = static_cast<AVColorSpace>(CVYCbCrMatrixGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
+    export_hdr_metadata(p,format);
     const auto full = get(kCMFormatDescriptionExtension_FullRangeVideo);
     p->color_range = full && CFEqual(full, kCFBooleanTrue) ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
     if (const auto ratio = get(kCVImageBufferPixelAspectRatioKey)) {

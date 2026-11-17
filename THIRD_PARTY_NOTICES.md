@@ -94,3 +94,45 @@ The AAC edit-list adapter is an original implementation of public QuickTime /
 ISO movie structures; it does not copy FFmpeg or qaac implementations. Apple's
 AudioToolbox is supplied by macOS, not bundled from Windows Apple Application
 Support. qaac is not a dependency of this repository.
+
+## NVEnc subtitle workflow and libass
+
+The external subtitle initialization, PTS-driven rendering and unchanged-image
+cache design in `src/apple/subtitle.cpp` references
+[NVEncFilterSubburn.cpp](https://github.com/rigaya/NVEnc/blob/5bb35d860bc5f877b01fe60e4de5ac756b9b80ed/NVEncCore/NVEncFilterSubburn.cpp)
+(MIT, rigaya, copyright 2014–2016; full license above). VTEnc's compositor is
+original Metal code. It does not include NVEnc CUDA kernels, FFmpeg subtitle
+video filters, or a CPU video compositor.
+
+VTEnc links libass (ISC), FreeType (FTL or GPLv2, choose FTL for distribution),
+HarfBuzz (MIT-style), FriBidi (LGPL-2.1-or-later), and their actual transitive
+build dependencies. macOS font selection uses the system CoreText provider.
+Font files supplied by users are not bundled. Homebrew may additionally link
+fontconfig, libunibreak, graphite2, glib and other libraries; audit the actual
+installed closure before distribution. No generic claim of LGPL-only packaging
+is made. Upstream licenses:
+[libass](https://github.com/libass/libass/blob/master/COPYING),
+[FreeType](https://gitlab.freedesktop.org/freetype/freetype/-/blob/master/docs/FTL.TXT),
+[HarfBuzz](https://github.com/harfbuzz/harfbuzz/blob/main/COPYING),
+[FriBidi](https://github.com/fribidi/fribidi/blob/master/COPYING).
+
+libass ISC License
+
+Copyright (C) 2006-2016 libass contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+FreeType attribution (FTL selection): Portions of this software are copyright
+© 1996–2026 The FreeType Project (https://freetype.org/). All rights reserved.
+The linked font libraries are external dependencies; redistribution must include
+their complete applicable licenses, notices and any required source materials.
