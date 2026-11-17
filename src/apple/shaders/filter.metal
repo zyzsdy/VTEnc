@@ -8,6 +8,7 @@ struct Parameters {
     float output_storage, output_y_offset, output_y_scale, output_c_offset, output_c_scale, output_max;
     float input_kr, input_kb, output_kr, output_kb;
     uint convert_matrix;
+    uint bob, field;
 };
 // Explicit float interpolation avoids hardware sampler fractional-weight quantization
 // when converting 8-bit textures to 10-bit output.
@@ -19,6 +20,16 @@ float4 bilinear(texture2d<float, access::read> tex, float2 position, float2 mini
     return mix(mix(tex.read(low), tex.read(uint2(high.x, low.y)), weight.x),
                mix(tex.read(uint2(low.x, high.y)), tex.read(high), weight.x), weight.y);
 }
+// A field has half the rows in each plane. Never interpolate across field parity.
+float4 field_bilinear(texture2d<float, access::read> tex, float2 coord,
+                      float2 minimum, float2 maximum, uint parity) {
+    coord = clamp(coord, minimum, maximum);
+    uint2 low = uint2(floor(coord)), high = min(low + 1, uint2(maximum));
+    float2 weight = fract(coord);
+    low.y = low.y * 2 + parity; high.y = high.y * 2 + parity;
+    return mix(mix(tex.read(low), tex.read(uint2(high.x, low.y)), weight.x),
+               mix(tex.read(uint2(low.x, high.y)), tex.read(high), weight.x), weight.y);
+}
 float3 sample_yuv(texture2d<float, access::read> y, texture2d<float, access::read> uv,
                   float2 position, constant Parameters& p) {
     float2 start(p.crop_x, p.crop_y), extent(p.crop_width, p.crop_height);
@@ -26,6 +37,16 @@ float3 sample_yuv(texture2d<float, access::read> y, texture2d<float, access::rea
     float yy = bilinear(y, position, start, start + extent - 1.0f).r;
     float2 chroma_position = (position - float2(p.chroma_x, p.chroma_y)) * 0.5f + 0.5f;
     float2 cc = bilinear(uv, chroma_position, start * 0.5f, (start + extent) * 0.5f - 1.0f).rg;
+    if (p.bob) {
+        yy = field_bilinear(y, float2(position.x - 0.5f, (position.y - 0.5f - p.field) * 0.5f),
+            float2(start.x, start.y * 0.5f), float2(start.x + extent.x - 1.0f, (start.y + extent.y) * 0.5f - 1.0f), p.field).r;
+        // Chroma siting is expressed in field-local luma coordinates. For left
+        // siting, top/bottom field chroma centers are full-frame y=1.5/2.5.
+        float2 field_chroma((position.x - p.chroma_x) * 0.5f,
+            (position.y - (2.0f * p.chroma_y - 0.5f + p.field)) * 0.25f);
+        cc = field_bilinear(uv, field_chroma, float2(start.x * 0.5f, start.y * 0.25f),
+            float2((start.x + extent.x) * 0.5f - 1.0f, (start.y + extent.y) * 0.25f - 1.0f), p.field).rg;
+    }
     float3 value((yy * p.input_storage - p.input_y_offset) / p.input_y_scale,
                  (cc * p.input_storage - p.input_c_offset) / p.input_c_scale);
     if (!p.convert_matrix) return value;

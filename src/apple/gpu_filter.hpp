@@ -16,6 +16,7 @@ struct FilterParameters {
     float output_storage, output_y_offset, output_y_scale, output_c_offset, output_c_scale, output_max;
     float input_kr, input_kb, output_kr, output_kb;
     unsigned convert_matrix;
+    unsigned bob = 0, field = 0;
 };
 struct FilterPlan {
     int input_width, input_height, width, height;
@@ -23,9 +24,11 @@ struct FilterPlan {
     FilterParameters parameters{};
     CFRef<CFDictionaryRef> attachments;
     CFRef<CFDictionaryRef> source_attachments;
+    float bottom_chroma_x = 0.5F, bottom_chroma_y = 1.0F;
 };
 [[nodiscard]] bool needs_gpu_filter(const EncodeConfig& config, CVPixelBufferRef source);
 [[nodiscard]] FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef format, CVPixelBufferRef source);
+[[nodiscard]] CFRef<CVPixelBufferPoolRef> make_metal_pixel_pool(int width, int height, OSType format);
 [[nodiscard]] CFRef<CVPixelBufferPoolRef> make_filter_pool(const FilterPlan& plan);
 [[nodiscard]] CFRef<CVPixelBufferRef> make_filter_buffer(CVPixelBufferPoolRef pool, const FilterPlan& plan);
 void validate_filter_frame(const FilterPlan& plan, CVPixelBufferRef frame);
@@ -35,7 +38,7 @@ public:
     explicit GpuFilter(FilterPlan plan);
     ~GpuFilter();
     // Returns a completed GPU buffer. No CPU pixel access, one command buffer in flight.
-    [[nodiscard]] CFRef<CVPixelBufferRef> process(CVPixelBufferRef source);
+    [[nodiscard]] CFRef<CVPixelBufferRef> process(CVPixelBufferRef source, int field = -1);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

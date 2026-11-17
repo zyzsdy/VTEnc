@@ -44,9 +44,17 @@ std::span<const std::uint8_t> atom(CMFormatDescriptionRef format, CFStringRef ke
     return {CFDataGetBytePtr(data), static_cast<std::size_t>(CFDataGetLength(data))};
 }
 }
-OSType source_pixel_format(CMFormatDescriptionRef format) {
+OSType source_pixel_format(CMFormatDescriptionRef format, bool allow_interlaced, bool* interlaced_coding) {
     const auto codec = CMFormatDescriptionGetMediaSubType(format);
     unsigned depth = 8;
+    bool field_coding = false;
+    if (const auto count = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FieldCount)) {
+        int value = 0;
+        if (CFGetTypeID(count) != CFNumberGetTypeID() || !CFNumberGetValue(static_cast<CFNumberRef>(count), kCFNumberIntType, &value) || (value != 1 && value != 2)) {
+            throw std::runtime_error("Invalid coded video field count");
+        }
+        field_coding = value == 2;
+    }
     if (codec == kCMVideoCodecType_H264) {
         const std::uint8_t* sps = nullptr;
         std::size_t size = 0;
@@ -91,7 +99,8 @@ OSType source_pixel_format(CMFormatDescriptionRef format) {
         bits.read(1);
         bits.ue(); // pic_width_in_mbs_minus1
         bits.ue(); // pic_height_in_map_units_minus1
-        if (!bits.read(1)) throw std::runtime_error("Interlaced H.264 requires P3 deinterlacing; P2 accepts progressive input only");
+        field_coding |= !bits.read(1); // frame_mbs_only_flag; MBAFF/field coding capability.
+
     } else if (codec == kCMVideoCodecType_HEVC || codec == 0x68657631U /* hev1 */) {
         const auto config = atom(format, CFSTR("hvcC"));
         if (config.size() < 23 || config[0] != 1) throw std::runtime_error("Invalid hvcC configuration");
@@ -104,6 +113,8 @@ OSType source_pixel_format(CMFormatDescriptionRef format) {
         if ((config[2] & 0x1c) != 0x0c) throw std::runtime_error("P2 requires 4:2:0 video chroma");
         depth = (config[2] & 0x40) ? ((config[2] & 0x20) ? 12 : 10) : 8;
     } else throw std::runtime_error("Unsupported source codec");
+    if (field_coding && !allow_interlaced) throw std::runtime_error("Interlaced video requires --deinterlace bob");
+    if (interlaced_coding) *interlaced_coding = field_coding;
     const auto range = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FullRangeVideo);
     const bool full = range && CFEqual(range, kCFBooleanTrue);
     if (depth == 8) return full ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;

@@ -20,11 +20,15 @@ struct ProbeConfig {
     int height = 1080;
 };
 
+enum class FieldOrder { automatic, tff, bff };
+
 enum class ColorMatrix { automatic, bt601, bt709 };
 enum class ColorRange { automatic, limited, full };
 enum class ChromaLocation { automatic, left, center, top_left };
 
 struct FilterConfig {
+    bool bob = false;
+    FieldOrder field_order = FieldOrder::automatic;
     std::optional<std::array<int, 2>> output_size;
     std::array<int, 4> crop{}; // left, top, right, bottom in stored luma pixels.
     ColorRange range = ColorRange::automatic;

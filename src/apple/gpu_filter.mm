@@ -58,22 +58,30 @@ GpuFilter::GpuFilter(FilterPlan plan) : impl_(std::make_unique<Impl>(std::move(p
     }
 }
 GpuFilter::~GpuFilter() = default;
-CFRef<CVPixelBufferRef> GpuFilter::process(CVPixelBufferRef source) {
+CFRef<CVPixelBufferRef> GpuFilter::process(CVPixelBufferRef source, int field) {
     @autoreleasepool {
         auto& s = *impl_;
         validate_filter_frame(s.plan, source);
+        if ((s.plan.parameters.bob && (field < 0 || field > 1)) || (!s.plan.parameters.bob && field != -1)) {
+            throw std::runtime_error("GPU Bob needs spatial field parity 0 or 1; progressive processing needs -1");
+        }
+        auto parameters = s.plan.parameters;
+        if (parameters.bob) {
+            parameters.field = static_cast<unsigned>(field);
+            if (field == 1) { parameters.chroma_x = s.plan.bottom_chroma_x; parameters.chroma_y = s.plan.bottom_chroma_y; }
+        }
         auto output = make_filter_buffer(s.pool.get(), s.plan);
         // Texture wrappers and both pixel buffers remain alive until command completion.
         std::array textures{texture(s.cache->get(), source, 0, false), texture(s.cache->get(), source, 1, false),
                             texture(s.cache->get(), output.get(), 0, true), texture(s.cache->get(), output.get(), 1, true)};
         auto command = [s.queue commandBuffer];
         if (!command) metal_error("Create Metal command buffer", nil);
-        command.label = @"VTEnc crop / bilinear scale / SDR YCbCr";
+        command.label = @"VTEnc Bob / crop / bilinear scale / SDR YCbCr";
         auto encoder = [command computeCommandEncoder];
         if (!encoder) metal_error("Create Metal compute encoder", nil);
         [encoder setComputePipelineState:s.pipeline];
         for (std::size_t index = 0; index < textures.size(); ++index) [encoder setTexture:CVMetalTextureGetTexture(textures[index].get()) atIndex:index];
-        [encoder setBytes:&s.plan.parameters length:sizeof(FilterParameters) atIndex:0];
+        [encoder setBytes:&parameters length:sizeof(FilterParameters) atIndex:0];
         const auto x = s.pipeline.threadExecutionWidth;
         const auto y = std::min<NSUInteger>(8, s.pipeline.maxTotalThreadsPerThreadgroup / x);
         [encoder dispatchThreads:MTLSizeMake(static_cast<NSUInteger>(s.plan.width), static_cast<NSUInteger>(s.plan.height), 1)

@@ -1,6 +1,8 @@
 #include "media_io.hpp"
 #include "source_format.hpp"
 #include "encoder_session.hpp"
+#include "bob.hpp"
+#include <limits>
 
 #include <array>
 #include <iostream>
@@ -64,6 +66,42 @@ int main() {
         try { vtenc::validate_video_edit(mapping, kCMTimeZero, CMTimeMake(20, 1), CMTimeMake(1, 30)); }
         catch (const std::runtime_error&) { rejected = true; }
         require(rejected, "Trimmed video edit accepted as a full-track transcode");
+        // Odd ticks must double the denominator, never round half a frame.
+        for (const auto duration : {CMTimeMake(1001, 30000), CMTimeMake(1, 25), CMTimeMake(7, 90)}) {
+            const auto start = CMTimeMake(1, 5);
+            const auto first = vtenc::bob_time(start, duration, 0);
+            const auto second = vtenc::bob_time(start, duration, 1);
+            require(CMTimeCompare(first.pts, start) == 0, "Bob changed movie origin");
+            require(CMTimeCompare(CMTimeAdd(first.pts, first.duration), second.pts) == 0, "Gap between Bob fields");
+            require(CMTimeCompare(CMTimeAdd(second.pts, second.duration), CMTimeAdd(start, duration)) == 0, "Bob changed interval end");
+            require(CMTimeCompare(first.duration, second.duration) == 0, "Unequal Bob field durations");
+        }
+        require(vtenc::bob_timescale(30000) == 60000, "Wrong Bob movie timescale");
+        for (const auto duration : {kCMTimeInvalid, kCMTimeZero, CMTimeMake(-1, 30), CMTimeMake(1, std::numeric_limits<int>::max())}) {
+            rejected = false;
+            try { (void)vtenc::bob_time(kCMTimeZero, duration, 0); } catch (const std::runtime_error&) { rejected = true; }
+            require(rejected, "Invalid or overflowing Bob interval accepted");
+        }
+        auto rounded = CMTimeMake(1, 30); rounded.flags |= kCMTimeFlags_HasBeenRounded;
+        rejected = false;
+        try { (void)vtenc::bob_time(rounded, CMTimeMake(1, 30), 0); } catch (const std::runtime_error&) { rejected = true; }
+        require(rejected, "Rounded Bob origin accepted");
+        CVPixelBufferRef raw_pixel = nullptr;
+        vtenc::check_status(CVPixelBufferCreate(nullptr, 16, 16, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nullptr, &raw_pixel), "Create field order fixture");
+        vtenc::CFRef pixel(raw_pixel);
+        require(vtenc::bob_first_field(vtenc::FieldOrder::tff, format.get(), pixel.get()) == 0 &&
+                vtenc::bob_first_field(vtenc::FieldOrder::bff, format.get(), pixel.get()) == 1, "Explicit field order ignored");
+        rejected = false;
+        try { (void)vtenc::bob_first_field(vtenc::FieldOrder::automatic, format.get(), pixel.get()); } catch (const std::runtime_error&) { rejected = true; }
+        require(rejected, "Missing field order guessed");
+        for (const auto detail : {kCVImageBufferFieldDetailTemporalTopFirst, kCVImageBufferFieldDetailSpatialFirstLineEarly}) {
+            CVBufferSetAttachment(pixel.get(), kCVImageBufferFieldDetailKey, detail, kCVAttachmentMode_ShouldPropagate);
+            require(vtenc::bob_first_field(vtenc::FieldOrder::automatic, format.get(), pixel.get()) == 0, "Auto TFF failed");
+        }
+        for (const auto detail : {kCVImageBufferFieldDetailTemporalBottomFirst, kCVImageBufferFieldDetailSpatialFirstLineLate}) {
+            CVBufferSetAttachment(pixel.get(), kCVImageBufferFieldDetailKey, detail, kCVAttachmentMode_ShouldPropagate);
+            require(vtenc::bob_first_field(vtenc::FieldOrder::automatic, format.get(), pixel.get()) == 1, "Auto BFF failed");
+        }
         std::cout << "Source format and rational movie timeline checks passed\n";
         return 0;
     } catch (const std::exception& error) {

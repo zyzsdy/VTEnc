@@ -1,4 +1,5 @@
 #include "media_io.hpp"
+#include "bob.hpp"
 #include "cf_ref.hpp"
 
 #import <AVFoundation/AVFoundation.h>
@@ -234,7 +235,7 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
         if (!state.writer) fail("AVAssetWriter init", error);
         state.video = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo outputSettings:nil sourceFormatHint:format];
         state.video.expectsMediaDataInRealTime = NO;
-        state.video.mediaTimeScale = info.video_timescale;
+        state.video.mediaTimeScale = config.filter.bob ? bob_timescale(info.video_timescale) : info.video_timescale;
         const auto& t = info.transform;
         const auto source_size = CMVideoFormatDescriptionGetDimensions(info.video_format);
         const auto output_size = CMVideoFormatDescriptionGetDimensions(format);
@@ -245,7 +246,7 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
             t[4] + min_x(source_size) - min_x(output_size), t[5] + min_y(source_size) - min_y(output_size));
         if (![state.writer canAddInput:state.video]) throw std::runtime_error("Container does not accept encoded video format");
         [state.writer addInput:state.video];
-        auto movie_scale = static_cast<std::int64_t>(info.video_timescale);
+        auto movie_scale = static_cast<std::int64_t>(state.video.mediaTimeScale);
         if (info.audio_format) {
             state.audio = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio outputSettings:nil sourceFormatHint:info.audio_format];
             state.audio.expectsMediaDataInRealTime = NO;

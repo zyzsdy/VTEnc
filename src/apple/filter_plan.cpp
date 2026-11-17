@@ -31,7 +31,7 @@ CFStringRef matrix_name(ColorMatrix matrix) {
 }
 
 bool needs_gpu_filter(const EncodeConfig& config, CVPixelBufferRef source) {
-    return config.filter.requested || describe(CVPixelBufferGetPixelFormatType(source)).depth != config.video.bit_depth;
+    return config.filter.bob || config.filter.requested || describe(CVPixelBufferGetPixelFormatType(source)).depth != config.video.bit_depth;
 }
 
 FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef format, CVPixelBufferRef source) {
@@ -49,6 +49,9 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
         std::ranges::any_of(crop, [](int x) { return x < 0 || x % 2; })) {
         throw std::runtime_error("GPU crop must leave a positive even 4:2:0 image; source=" +
             std::to_string(width) + "x" + std::to_string(height));
+    }
+    if (config.filter.bob && (height % 4 || crop[1] % 4 || crop[3] % 4 || cropped_height < 4)) {
+        throw std::runtime_error("Bob requires source height and vertical crop margins divisible by four, leaving at least four rows");
     }
     const auto size = config.filter.output_size.value_or(std::array<int, 2>{static_cast<int>(cropped_width), static_cast<int>(cropped_height)});
     if (size[0] <= 0 || size[1] <= 0 || size[0] % 2 || size[1] % 2) throw std::runtime_error("GPU output dimensions must be positive and even");
@@ -86,6 +89,19 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
         else if (value && CFEqual(value, kCVImageBufferChromaLocation_TopLeft)) chroma = ChromaLocation::top_left;
         else throw std::runtime_error("Missing or unsupported source chroma location; specify --input-chroma-loc left|center|top-left");
     }
+    auto bottom_chroma = chroma;
+    if (config.filter.bob && config.filter.input_chroma == ChromaLocation::automatic) {
+        const auto value = metadata(format, source_attachments.get(), kCVImageBufferChromaLocationBottomFieldKey);
+        if (value && CFEqual(value, kCVImageBufferChromaLocation_Left)) bottom_chroma = ChromaLocation::left;
+        else if (value && CFEqual(value, kCVImageBufferChromaLocation_Center)) bottom_chroma = ChromaLocation::center;
+        else if (value && CFEqual(value, kCVImageBufferChromaLocation_TopLeft)) bottom_chroma = ChromaLocation::top_left;
+        else throw std::runtime_error("Missing or unsupported bottom-field chroma location; specify --input-chroma-loc");
+    }
+    if (config.filter.bob) {
+        const int count = 1;
+        CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &count));
+        CFDictionarySetValue(attachments.get(), kCVImageBufferFieldCountKey, number.get());
+    }
     // H.264/HEVC output uses left-sited 4:2:0. Resample other input locations explicitly.
     CFDictionarySetValue(attachments.get(), kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Left);
     CFDictionarySetValue(attachments.get(), kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferChromaLocation_Left);
@@ -120,8 +136,11 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
     p.output_kr = output_matrix == ColorMatrix::bt601 ? 0.299F : 0.2126F;
     p.output_kb = output_matrix == ColorMatrix::bt601 ? 0.114F : 0.0722F;
     p.convert_matrix = input_matrix != output_matrix;
+    p.bob = config.filter.bob;
     CFRetain(attachments.get());
     FilterPlan plan{width, height, size[0], size[1], input_type, output_type, p, CFRef<CFDictionaryRef>(attachments.get()), std::move(source_attachments)};
+    plan.bottom_chroma_x = bottom_chroma == ChromaLocation::center ? 1.0F : 0.5F;
+    plan.bottom_chroma_y = bottom_chroma == ChromaLocation::top_left ? 0.5F : 1.0F;
     validate_filter_frame(plan, source);
     return plan;
 }
@@ -134,7 +153,7 @@ void validate_filter_frame(const FilterPlan& plan, CVPixelBufferRef frame) {
     }
     for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey,
                           kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey,
-                          kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferFieldCountKey,
+                          kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferFieldCountKey, kCVImageBufferFieldDetailKey,
                           kCVImageBufferPixelAspectRatioKey, kCVImageBufferCleanApertureKey}) {
         const auto expected = CFDictionaryGetValue(plan.source_attachments.get(), key);
         auto raw = CVBufferCopyAttachment(frame, key, nullptr);
@@ -148,14 +167,17 @@ void validate_filter_frame(const FilterPlan& plan, CVPixelBufferRef frame) {
 }
 
 CFRef<CVPixelBufferPoolRef> make_filter_pool(const FilterPlan& plan) {
+    return make_metal_pixel_pool(plan.width, plan.height, plan.output_format);
+}
+CFRef<CVPixelBufferPoolRef> make_metal_pixel_pool(int width, int height, OSType format) {
     CFRef dictionary(CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
     const auto set_int = [&](CFStringRef key, int value) {
         CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &value));
         CFDictionarySetValue(dictionary.get(), key, number.get());
     };
-    set_int(kCVPixelBufferWidthKey, plan.width);
-    set_int(kCVPixelBufferHeightKey, plan.height);
-    set_int(kCVPixelBufferPixelFormatTypeKey, static_cast<int>(plan.output_format));
+    set_int(kCVPixelBufferWidthKey, width);
+    set_int(kCVPixelBufferHeightKey, height);
+    set_int(kCVPixelBufferPixelFormatTypeKey, static_cast<int>(format));
     CFDictionarySetValue(dictionary.get(), kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
     CFRef surface(CFDictionaryCreate(kCFAllocatorDefault, nullptr, nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
     CFDictionarySetValue(dictionary.get(), kCVPixelBufferIOSurfacePropertiesKey, surface.get());

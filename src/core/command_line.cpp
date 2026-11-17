@@ -68,7 +68,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (!common && arg != "-i" && arg != "-o" && arg != "--input-res" && arg != "--fps" &&
             arg != "--frames" && arg != "--gop-len" && arg != "--bitrate" && arg != "--quality" &&
             arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
-            arg != "--input-matrix" && arg != "--output-matrix" && arg != "--input-chroma-loc") {
+            arg != "--input-matrix" && arg != "--output-matrix" && arg != "--input-chroma-loc" && arg != "--deinterlace" && arg != "--field-order") {
             throw std::invalid_argument("Unknown argument: " + std::string(arg));
         }
         encode_options |= !common;
@@ -86,7 +86,15 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             else throw std::invalid_argument("--output-depth must be 8 or 10");
         } else if (arg == "-i") result.encode.input = value;
         else if (arg == "-o") result.encode.output = value;
-        else if (arg == "--output-range") {
+        else if (arg == "--deinterlace") {
+            if (value != "bob") throw std::invalid_argument("--deinterlace supports only bob");
+            result.encode.filter.bob = true;
+        } else if (arg == "--field-order") {
+            if (value == "auto") result.encode.filter.field_order = FieldOrder::automatic;
+            else if (value == "tff") result.encode.filter.field_order = FieldOrder::tff;
+            else if (value == "bff") result.encode.filter.field_order = FieldOrder::bff;
+            else throw std::invalid_argument("--field-order requires auto, tff or bff");
+        } else if (arg == "--output-range") {
             result.encode.filter.requested = true;
             if (value == "limited") result.encode.filter.range = ColorRange::limited;
             else if (value == "full") result.encode.filter.range = ColorRange::full;
@@ -155,6 +163,9 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             result.encode.quality = quality;
         }
     }
+    if (seen.contains("--field-order") && !result.encode.filter.bob) {
+        throw std::invalid_argument("--field-order requires --deinterlace bob");
+    }
     if (encode_options) {
         if (has_command) throw std::invalid_argument("Encoding options cannot be combined with a query command");
         result.command = Command::encode;
@@ -185,6 +196,15 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         } else {
             if (result.encode.filter.requested) throw std::invalid_argument("GPU filters require MP4/MOV input");
             if (!seen.contains("--input-res")) throw std::invalid_argument("Encoding requires --input-res WIDTHxHEIGHT");
+            if (result.encode.filter.bob) {
+                if (synthetic) throw std::invalid_argument("Bob requires file input, not --synthetic");
+                if (result.encode.filter.field_order == FieldOrder::automatic) throw std::invalid_argument("Raw Bob requires --field-order tff|bff");
+                if (result.encode.frames > std::numeric_limits<std::int32_t>::max() / 2 ||
+                    (result.encode.fps_den % 2 && result.encode.fps_num > std::numeric_limits<std::int32_t>::max() / 2)) {
+                    throw std::invalid_argument("Raw Bob doubled frame count or frame-rate timescale exceeds 32-bit range");
+                }
+                if (result.probe.height % 4) throw std::invalid_argument("Raw Bob requires height divisible by four for interlaced 4:2:0");
+            }
             if (!seen.contains("--frames")) throw std::invalid_argument("Encoding requires --frames COUNT");
             if (seen.contains("--audio-copy") || seen.contains("--no-audio")) {
                 throw std::invalid_argument("Audio options require MP4/MOV input");
@@ -216,6 +236,7 @@ Usage:
         [--crop LEFT,TOP,RIGHT,BOTTOM] [--output-res WIDTHxHEIGHT]
         [--output-range limited|full] [--output-matrix bt601|bt709]
         [--input-matrix bt601|bt709] [--input-chroma-loc left|center|top-left]
+        [--deinterlace bob] [--field-order auto|tff|bff]
         [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
         --frames COUNT [--codec h264|hevc] [--output-depth 8|10]
@@ -223,7 +244,10 @@ Usage:
 
 Encoding defaults: h264, 8-bit, 30/1 fps, 5000 kbit/s average target, GOP limit 60.
 Input: tightly packed NV12 (8-bit) or P010 little-endian (10-bit in high bits),
-video range, progressive BT.709 SDR. No pixel format or HDR conversion.
+video range, BT.709 SDR. No raw pixel format or HDR conversion.
+Raw Bob: add --deinterlace bob --field-order tff|bff; --fps and --frames describe
+input frame pairs, output has twice the frame count/rate. Interleaved fields in
+both planes, left chroma siting per field, height divisible by four.
 --frames is the exact number to read; trailing raw frames are not consumed.
 Output: Annex B elementary stream plus <output-file>.timestamps.csv with rational
 PTS/DTS/duration and byte offsets. Existing files are never overwritten.
@@ -239,7 +263,12 @@ Output pixel aspect ratio is preserved; explicit output size may stretch the ima
 Matrix conversion changes YCbCr coefficients only, preserving primaries and transfer.
 Missing matrix/chroma metadata requires an explicit input override when needed.
 No gamut/transfer conversion, tone mapping, dithering or antialiasing downscale.
-SDR progressive video only; HDR, Dolby Vision and interlaced input are rejected.
+SDR only; interlaced input requires explicit --deinterlace bob (Metal, two outputs
+per input). Auto field order requires unambiguous metadata; tff/bff overrides it.
+Bob requires height and vertical crop margins divisible by four, keeps telecine
+repeated fields, and is not inverse telecine. Hardware decode remains mandatory
+for MP4/MOV; unsupported interlaced codecs fail, with no software fallback.
+HDR and Dolby Vision are rejected.
 Exit codes: 0 success, 1 runtime/hardware failure, 2 invalid arguments, 130 cancelled.
 )";
 }

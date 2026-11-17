@@ -46,24 +46,31 @@ CFRef<CVPixelBufferRef> pixel_buffer(const Image& image) {
     return result;
 }
 // Bilinear interpolation of code values with crop-local edge extension.
-double interpolate(const Image& input, int plane, double x, double y, const std::array<int, 4>& crop) {
+double interpolate(const Image& input, int plane, double x, double y, const std::array<int, 4>& crop, int field = -1) {
     const int div = plane ? 2 : 1, width = input.width / div;
-    const int min_x = crop[0] / div, min_y = crop[1] / div;
-    const int max_x = (input.width - crop[2]) / div - 1, max_y = (input.height - crop[3]) / div - 1;
+    const int step = field >= 0 ? 2 : 1;
+    const int min_x = crop[0] / div, min_y = crop[1] / div / step;
+    const int max_x = (input.width - crop[2]) / div - 1, max_y = (input.height - crop[3]) / div / step - 1;
     x = std::clamp(x, static_cast<double>(min_x), static_cast<double>(max_x));
     y = std::clamp(y, static_cast<double>(min_y), static_cast<double>(max_y));
     const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
     const int x1 = std::min(x0 + 1, max_x), y1 = std::min(y0 + 1, max_y);
-    const auto at = [&](int xx, int yy) { return input.planes[static_cast<std::size_t>(plane)][static_cast<std::size_t>(yy * width + xx)]; };
+    const auto at = [&](int xx, int yy) { return input.planes[static_cast<std::size_t>(plane)][static_cast<std::size_t>((yy * step + (field >= 0 ? field : 0)) * width + xx)]; };
     return std::lerp(std::lerp(at(x0, y0), at(x1, y0), x - x0),
                      std::lerp(at(x0, y1), at(x1, y1), x - x0), y - y0);
 }
-std::array<double, 3> reference(const Image& input, double x, double y, const EncodeConfig& config, bool convert) {
+std::array<double, 3> reference(const Image& input, double x, double y, const EncodeConfig& config, bool convert, int field = -1) {
     double cx = config.filter.input_chroma == ChromaLocation::center ? 1.0 : 0.5;
     double cy = config.filter.input_chroma == ChromaLocation::top_left ? 0.5 : 1.0;
     double yy = interpolate(input, 0, x - 0.5, y - 0.5, config.filter.crop);
     double u = interpolate(input, 1, (x - cx) / 2, (y - cy) / 2, config.filter.crop);
     double v = interpolate(input, 2, (x - cx) / 2, (y - cy) / 2, config.filter.crop);
+    if (field >= 0) {
+        yy = interpolate(input, 0, x - 0.5, (y - 0.5 - field) / 2, config.filter.crop, field);
+        const auto field_y = (y - (2 * cy - 0.5 + field)) / 4;
+        u = interpolate(input, 1, (x - cx) / 2, field_y, config.filter.crop, field);
+        v = interpolate(input, 2, (x - cx) / 2, field_y, config.filter.crop, field);
+    }
     const double factor = input.depth == 10 ? 4 : 1, max = input.depth == 10 ? 1023 : 255;
     yy = (yy - (input.full ? 0 : 16 * factor)) / (input.full ? max : 219 * factor);
     u = (u - 128 * factor) / (input.full ? max : 224 * factor);
@@ -84,7 +91,7 @@ std::array<double, 3> reference(const Image& input, double x, double y, const En
             u * (full ? out_max : 224 * out_factor) + 128 * out_factor,
             v * (full ? out_max : 224 * out_factor) + 128 * out_factor};
 }
-int verify(const Image& image, CVPixelBufferRef output, const EncodeConfig& config, bool convert) {
+int verify(const Image& image, CVPixelBufferRef output, const EncodeConfig& config, bool convert, int field = -1) {
     const int width = static_cast<int>(CVPixelBufferGetWidth(output)), height = static_cast<int>(CVPixelBufferGetHeight(output));
     const auto crop = config.filter.crop;
     const double scale_x = static_cast<double>(image.width - crop[0] - crop[2]) / width;
@@ -99,7 +106,7 @@ int verify(const Image& image, CVPixelBufferRef output, const EncodeConfig& conf
         for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
             const double xx = crop[0] + (plane ? 2 * x + 0.5 : x + 0.5) * scale_x;
             const double yy = crop[1] + (plane ? 2 * y + 1.0 : y + 0.5) * scale_y;
-            const auto expected = reference(image, xx, yy, config, convert)[static_cast<std::size_t>(plane)];
+            const auto expected = reference(image, xx, yy, config, convert, field)[static_cast<std::size_t>(plane)];
             const int max = config.video.bit_depth == 10 ? 1023 : 255;
             const int code = static_cast<int>(std::round(std::clamp(expected, 0.0, static_cast<double>(max))));
             const auto row = base + static_cast<std::size_t>(y) * stride;
@@ -187,6 +194,49 @@ int main() try {
         try { (void)bounded.process(pixel.get()); } catch (const std::runtime_error&) { rejected = true; }
         require(rejected, "Midstream decoded color change was not rejected");
     }
+    int bob_cases = 0, bob_error = 0;
+    for (int depth : {8, 10}) for (bool full : {false, true}) {
+        Image fixture{18, 16, depth, full, {}};
+        const int factor = depth == 10 ? 4 : 1;
+        for (int plane = 0; plane < 3; ++plane) {
+            const int w = plane ? 9 : 18, h = plane ? 8 : 16;
+            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                // Opposite fields have deliberately different brightness/chroma.
+                fixture.planes[static_cast<std::size_t>(plane)].push_back((16 + (y % 2) * 140 + x * 2 + y + plane * 5) * factor);
+            }
+        }
+        auto pixel = pixel_buffer(fixture);
+        CMVideoFormatDescriptionRef raw = nullptr;
+        check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr, pixel.get(), &raw), "Describe Bob fixture");
+        CFRef format(raw);
+        for (int output_depth : {8, 10}) for (bool output_full : {false, true})
+        for (auto chroma : {ChromaLocation::left, ChromaLocation::center, ChromaLocation::top_left})
+        for (int geometry = 0; geometry < 3; ++geometry) {
+            EncodeConfig config;
+            config.filter.bob = true;
+            config.video.bit_depth = output_depth;
+            config.filter.input_chroma = chroma;
+            config.filter.input_matrix = ColorMatrix::bt709;
+            config.filter.output_matrix = geometry == 2 ? ColorMatrix::bt601 : ColorMatrix::bt709;
+            config.filter.range = output_full ? ColorRange::full : ColorRange::limited;
+            if (geometry) {
+                config.filter.crop = {2, 4, 4, 4};
+                config.filter.output_size = geometry == 1 ? std::array<int, 2>{26, 18} : std::array<int, 2>{6, 4};
+            }
+            GpuFilter filter(make_filter_plan(config, format.get(), pixel.get()));
+            for (int field : {0, 1}) {
+                auto output = filter.process(pixel.get(), field);
+                const auto error = verify(fixture, output.get(), config, geometry == 2, field);
+                require(error <= 1, "Bob mixed fields or exceeded one target code value");
+                bob_error = std::max(bob_error, error); ++bob_cases;
+                auto raw_count = CVBufferCopyAttachment(output.get(), kCVImageBufferFieldCountKey, nullptr);
+                require(raw_count, "Bob output lacks progressive field count");
+                CFRef count(raw_count); int number = 0;
+                require(CFNumberGetValue(static_cast<CFNumberRef>(count.get()), kCFNumberIntType, &number) && number == 1, "Bob output is not progressive");
+            }
+        }
+    }
+    std::cout << "PASS " << bob_cases << " Bob field pixel cases; maximum error=" << bob_error << " code value\n";
     std::cout << "PASS " << cases << " Metal pixel cases; maximum error=" << largest << " code value; P010 low bits zero\n";
     return 0;
 } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

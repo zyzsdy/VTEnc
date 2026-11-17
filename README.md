@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-已实现 P1 硬编闭环、P2 原生 MP4/MOV 文件转码，以及 P3 首批 GPU 缩放、裁剪和基础色彩转换。现有功能：
+已实现 P1 硬编闭环、P2 原生 MP4/MOV 文件转码，以及 P3 GPU 缩放、裁剪、基础色彩转换与 Bob 反交错。现有功能：
 
 - CMake / Ninja 的 Debug、Release 构建与安装目标。
 - 纯 C++ CLI、参数校验，以及独立的 Apple 框架适配库。
@@ -17,6 +17,7 @@
 - MP4/MOV 压缩样本读取、显式 VideoToolbox 硬解、硬编和原生封装，默认复制第一条音轨。
 - 文件转码保留源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换；支持 `hev1` 描述适配。
 - Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709 YCbCr 矩阵转换。
+- Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010 和硬解可用的文件输入。当前两个交错样片的原始 H.264 码流在本机无法硬解，详见下文。
 - 有界回调和重排队列、背压和排空；SIGINT 取消、失败清理、输出防覆盖。
 - 不依赖硬件编码器的 CLI / 码流适配检查，以及显式硬件集成验证脚本。
 
@@ -130,7 +131,7 @@ python3 tests/transcode_hardware.py --vtenc build/dev/vtenc
 
 音频由 `AVAssetReaderTrackOutput(outputSettings:nil)` 读取压缩数据，`AVAssetWriterInput(outputSettings:nil)` 封装复制，不进行音频重编码。默认选择第一条音轨；`--no-audio` 显式禁用。保留原生 AAC priming、尾部裁剪和编辑映射，音视频共用电影时间原点，不分别归零。轨道配置变化、不兼容容器、重复音频 PTS、无法精确表示的时间基等问题直接失败。
 
-当前限定一个逐行 SDR 视频轨；P3 已加入下述位深、尺寸和基础色彩转换。不支持 HDR / Dolby Vision、交错、音频转码、多音轨选择、字幕、章节与附件。显示旋转仅保留容器变换，不修改像素。支持单段正常速率的视频编辑映射；不实现时间裁剪（Trim）、变速或复杂编辑列表。对旧文件因声明时长舍入而落在末尾边界外的完整视频帧予以保留，不以粗粒度声明时长截断码流；显著裁剪存储视频帧的编辑映射会报错。
+当前限定一个 SDR 视频轨；交错输入必须显式启用下述 Bob，且文件模式仍要求硬解成功。P3 已加入位深、尺寸和基础色彩转换。不支持 HDR / Dolby Vision、音频转码、多音轨选择、字幕、章节与附件。显示旋转仅保留容器变换，不修改像素。支持单段正常速率的视频编辑映射；不实现时间裁剪（Trim）、变速或复杂编辑列表。对旧文件因声明时长舍入而落在末尾边界外的完整视频帧予以保留，不以粗粒度声明时长截断码流；显著裁剪存储视频帧的编辑映射会报错。
 
 取消或运行错误不发布成品，临时输出目录自动清理；成功结束封装后以不覆盖既有文件的方式发布。写出背压和封装完成等待均检查取消与错误，并对 30 秒无进展报错。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
 
@@ -162,9 +163,37 @@ python3 tests/filter_hardware.py --vtenc build/dev/vtenc
 
 GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理路径不锁定或复制 CPU 像素，无 CPU 滤镜回退。每帧等待 Metal 命令成功完成后提交硬编，保留原 PTS / duration，输出缓冲池最多 3 个。stdout 的 `Metal GPU frames completed` 统计成功提交硬编的已完成 GPU 帧；无需滤镜且位深相同时为 0。
 
-当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持 HDR、tone mapping、色域 / 传递函数转换、物理旋转、Bicubic/Lanczos、字幕合成和反交错。这些仍属于后续工作。
+当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持 HDR、tone mapping、色域 / 传递函数转换、物理旋转、Bicubic/Lanczos、字幕合成和运动自适应反交错。这些仍属于后续工作。
 
 2026-11-17 已在本机完成 240 组 GPU 逐像素参考比对、`video_samples` 的 11 个成功转码用例和 6 个拒绝用例，以及 P2 回归；详见 [P3 验证记录](docs/P3验证.md)。结果不代表其他硬件、系统或任意尺寸已验证，也不承诺零拷贝或长期吞吐量。
+
+## P3 Bob 反交错
+
+`--deinterlace bob` 对每个输入帧对的两个场分别进行垂直线性重建，按时间先后输出完整尺寸的逐行帧。Y 与 UV 都只从所选场取样；色度位置按各场坐标解释，再转换为逐行 left 色度位置。Bob 可与文件模式的裁剪、缩放和色彩转换组合；源高度和上下裁剪边距必须为 4 的倍数，以保留完整的 4:2:0 场布局。
+
+`--field-order auto|tff|bff` 默认 auto，要求解码缓冲区或格式描述有无歧义的场序；缺失时直接报错。tff/bff 是显式源解释覆盖，也可处理实际包含交错栅格但被标记为逐行编码的文件。它不是场序检测器，选错会颠倒运动时序。不启用 Bob 时继续拒绝已识别的交错输入。
+
+文件模式精确拆分每帧的显示区间：第一场 PTS 为原 PTS，第二场为原 PTS 加半个 duration，两个输出 duration 相等。保留 VFR 间隔和 A/V 起点，封装视频时间基加倍，不能精确表示时失败。原音轨仍逐包复制。每场 GPU 完成后才提交硬编，保持有界资源与取消清理。
+
+```bash
+# 压缩输入仍须实际支持 VT 硬解；不会自动降级
+./build/dev/vtenc -i interlaced.mp4 -o build/bob.mp4 \
+  --deinterlace bob --field-order tff
+
+# 已有原始交错 NV12：180 个场对 → 360 个逐行帧，30000/1001 → 60000/1001
+./build/dev/vtenc -i interlaced.nv12 -o build/bob.h264 \
+  --input-res 720x480 --frames 180 --fps 30000/1001 \
+  --deinterlace bob --field-order tff
+
+# 显式验证；包含离线测试夹具准备，不是程序的软件回退
+python3 tests/bob_hardware.py --vtenc build/dev/vtenc
+```
+
+原始 Bob 模式必须给出 tff/bff，不接受合成输入。Y 平面与交错 UV 平面都按行交织上下场，使用每场 left 色度位置、BT.709 SDR limited range；P010 仍为高 10 位存储。`--fps` / `--frames` 描述输入场对，输出数量和帧率加倍；`--gop-len` 仍计输出帧。原始模式只增加 Bob，不开放其他 GPU 滤镜参数，也不改变 P1 输入/输出同位深的约定。Annex B 时间轴以配套 CSV 为准，外部封装需使用倍频后的帧率。
+
+**本机限制：**`video_samples/deinterlace` 的普通交错和 3:2 hard telecine 原始 MP4，强制硬解均在创建会话时返回 `OSStatus=-12911`。因此这两个原始文件的完整硬解转码未通过。测试明确将其记为硬解受阻；另将样片离线导出为原始帧，实际验证 Metal Bob 与 VT 硬编，并用明确标注的逐行编码交错栅格载体 / VFR 文件验证硬解、调度和音轨复制。VTEnc 不调用 FFmpeg，也没有软件视频解码回退。
+
+Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/1001p；不实现 IVTC、soft telecine 的重复场展开、场匹配、运动自适应或自动混合模式检测。单场重建会损失垂直细节，细线可能闪烁。真实结果和复现边界见 [Bob 验证记录](docs/P3Bob验证.md)。
 
 ## 代码布局
 

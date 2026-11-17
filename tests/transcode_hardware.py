@@ -46,11 +46,19 @@ def packets(data, kind):
     return stream, result
 
 
-def verify(source, output, codec, depth, copy_audio, expected_size=None, expected_color=None):
+def verify(source, output, codec, depth, copy_audio, expected_size=None, expected_color=None, bob=False):
     before, after = probe(source), probe(output)
     src_video, src_packets = packets(before, "video")
     dst_video, dst_packets = packets(after, "video")
-    require([p["time"] for p in dst_packets] == sorted(p["time"] for p in src_packets),
+    ordered = sorted(src_packets, key=lambda p: p["time"])
+    expected_times = [p["time"] for p in ordered]
+    if bob:
+        expected_times = []
+        for index, packet in enumerate(ordered):
+            length = ordered[index + 1]["time"] - packet["time"] if index + 1 < len(ordered) else packet["length"]
+            expected_times.extend([packet["time"], packet["time"] + length / 2])
+        require(dst_packets[-1]["length"] == ordered[-1]["length"] / 2, "Wrong final Bob field duration")
+    require([p["time"] for p in dst_packets] == expected_times,
             f"{output.name}: video PTS/frame count changed")
     require(all(p["time"] == p["decode_time"] for p in dst_packets), "Unexpected output reordering")
     require(dst_video["codec_name"] == codec, "Wrong output codec")

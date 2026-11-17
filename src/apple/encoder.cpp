@@ -1,6 +1,8 @@
 #include "vtenc/encoder.hpp"
 #include "encoder_session.hpp"
 #include "bitstream_output.hpp"
+#include "gpu_filter.hpp"
+#include "bob.hpp"
 
 #include <array>
 #include <atomic>
@@ -158,6 +160,54 @@ private:
 };
 
 
+EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const volatile std::sig_atomic_t& cancelled) {
+    const auto output_config = raw_bob_output_config(config);
+    BitstreamOutput output(output_config);
+    OutputQueue queue;
+    CompressionSession session;
+    create_hardware_session(session, output_config.video, &OutputQueue::callback, &queue);
+    configure_hardware_encoder(session.value, output_config);
+    check_status(VTCompressionSessionPrepareToEncodeFrames(session.value), "Prepare raw Bob hardware encoder");
+    verify_hardware(session.value);
+    const auto type = config.video.bit_depth == 10 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    auto pool = make_metal_pixel_pool(config.video.width, config.video.height, type);
+    std::unique_ptr<GpuFilter> filter;
+    std::int64_t submitted = 0;
+    const unsigned first = config.filter.field_order == FieldOrder::tff ? 0U : 1U;
+    for (std::int64_t index = 0; index < config.frames && !cancelled; ++index) {
+        CVPixelBufferRef raw = nullptr;
+        check_status(CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool.get(), &raw), "Allocate raw Bob source");
+        CFRef pixel(raw);
+        source.fill(pixel.get(), config, index);
+        CVBufferSetAttachment(raw, kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Left, kCVAttachmentMode_ShouldPropagate);
+        CVBufferSetAttachment(raw, kCVImageBufferChromaLocationBottomFieldKey, kCVImageBufferChromaLocation_Left, kCVAttachmentMode_ShouldPropagate);
+        if (!filter) {
+            CMVideoFormatDescriptionRef description = nullptr;
+            check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, raw, &description), "Describe raw Bob source");
+            CFRef format(description);
+            filter = std::make_unique<GpuFilter>(make_filter_plan(config, format.get(), raw));
+        }
+        for (unsigned field = 0; field < 2 && !cancelled; ++field) {
+            auto processed = filter->process(raw, static_cast<int>(first ^ field));
+            const auto timing = bob_time(CMTimeMake(index * config.fps_den, config.fps_num), CMTimeMake(config.fps_den, config.fps_num), field);
+            VTEncodeInfoFlags flags = 0;
+            check_status(VTCompressionSessionEncodeFrame(session.value, processed.get(), timing.pts, timing.duration,
+                nullptr, nullptr, &flags), "Encode raw Bob field=" + std::to_string(field));
+            if (flags & kVTEncodeInfo_FrameDropped) throw std::runtime_error("Hardware encoder dropped a Bob field");
+            ++submitted;
+            check_status(VTCompressionSessionCompleteFrames(session.value, kCMTimeInvalid), "Drain raw Bob field");
+            queue.drain(output);
+            if (output.frames() != submitted) throw std::runtime_error("Missing encoded Bob field");
+        }
+    }
+    verify_hardware(session.value);
+    if (cancelled) return {output.frames(), output.bytes(), true, 0, submitted};
+    if (submitted != output_config.frames) throw std::runtime_error("Wrong Bob output count");
+    output.publish();
+    return {output.frames(), output.bytes(), false, 0, submitted};
+}
+
+
 } // namespace
 
 EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled) {
@@ -168,6 +218,7 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
         throw std::invalid_argument("Invalid encoding configuration");
     }
     RawSource source(config);
+    if (config.filter.bob) return encode_raw_bob(config, source, cancelled);
     BitstreamOutput output(config);
     OutputQueue queue; // Must outlive the session, including error/early-return teardown.
     CompressionSession session;

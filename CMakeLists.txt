@@ -43,6 +43,7 @@ add_library(vtenc_apple STATIC
     src/apple/encoder.cpp
     src/apple/transcode.cpp
     src/apple/filter_plan.cpp
+    src/apple/bob.cpp
     src/apple/gpu_filter.mm
     src/apple/source_format.cpp
     src/apple/media_io.mm

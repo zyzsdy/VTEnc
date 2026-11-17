@@ -3,6 +3,7 @@
 #include "media_io.hpp"
 #include "source_format.hpp"
 #include "gpu_filter.hpp"
+#include "bob.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -28,7 +29,7 @@ bool sample_flag(CMSampleBufferRef sample, CFStringRef key) {
     return value && CFEqual(value, kCFBooleanTrue);
 }
 
-void validate_source(CMFormatDescriptionRef format) {
+void validate_source(CMFormatDescriptionRef format, bool bob) {
     const auto codec = CMFormatDescriptionGetMediaSubType(format);
     if (codec == 0x64766831U || codec == 0x64766865U) throw std::runtime_error("Dolby Vision input is not supported by the P2 SDR pipeline");
     if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != 0x68657631U && codec != kCMVideoCodecType_AV1) {
@@ -40,7 +41,8 @@ void validate_source(CMFormatDescriptionRef format) {
         if (CFGetTypeID(fields) != CFNumberGetTypeID() || !CFNumberGetValue(static_cast<CFNumberRef>(fields), kCFNumberIntType, &count)) {
             throw std::runtime_error("Invalid video field count");
         }
-        if (count != 1) throw std::runtime_error("Interlaced video requires P3 deinterlacing; P2 accepts progressive input only");
+        if (count != 1 && count != 2) throw std::runtime_error("Unsupported video field count");
+        if (count == 2 && !bob) throw std::runtime_error("Interlaced video requires --deinterlace bob");
     }
     const auto transfer = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_TransferFunction);
     if (transfer && (CFEqual(transfer, kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ) ||
@@ -65,13 +67,14 @@ struct Frame {
 
 class HardwareDecoder {
 public:
-    explicit HardwareDecoder(CMFormatDescriptionRef format) : format_(hardware_decode_format(format)) {
-        validate_source(format);
+    HardwareDecoder(CMFormatDescriptionRef format, bool bob) : format_(hardware_decode_format(format)) {
+        validate_source(format, bob);
         const void* keys[] = {kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder};
         const void* values[] = {kCFBooleanTrue};
         CFRef specification(CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1,
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
-        const auto pixel_format = static_cast<std::int32_t>(source_pixel_format(format));
+        bool interlaced_coding = false;
+        const auto pixel_format = static_cast<std::int32_t>(source_pixel_format(format, bob, &interlaced_coding));
         CFRef pixel_number(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pixel_format));
         CFRef surface(CFDictionaryCreate(kCFAllocatorDefault, nullptr, nullptr, 0,
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
@@ -81,10 +84,23 @@ public:
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
         VTDecompressionOutputCallbackRecord callback{&receive, this};
         check_status(VTDecompressionSessionCreate(kCFAllocatorDefault, format_.get(), specification.get(), attributes.get(),
-            &callback, &session_), "VTDecompressionSessionCreate [hardware required]");
+            &callback, &session_), bob ? "VTDecompressionSessionCreate [hardware required; Bob source; no software fallback]"
+                                      : "VTDecompressionSessionCreate [hardware required]");
         if (!session_) throw std::runtime_error("No hardware decompression session returned");
         // Guard creation's remaining operations, because a throwing constructor has no destructor.
-        try { verify(); }
+        try {
+            // Progressive-coded rasters can contain woven fields when explicitly
+            // overridden by the user; no decoder field handling applies to those.
+            if (bob && interlaced_coding) {
+                check_status(VTSessionSetProperty(session_, kVTDecompressionPropertyKey_FieldMode,
+                    kVTDecompressionProperty_FieldMode_BothFields), "Set decoder FieldMode=BothFields [Metal Bob requires woven fields]");
+                CFTypeRef raw_mode = nullptr;
+                check_status(VTSessionCopyProperty(session_, kVTDecompressionPropertyKey_FieldMode, nullptr, &raw_mode), "Read decoder FieldMode");
+                CFRef mode(raw_mode);
+                if (!CFEqual(mode.get(), kVTDecompressionProperty_FieldMode_BothFields)) throw std::runtime_error("Decoder did not confirm woven BothFields output");
+            }
+            verify();
+        }
         catch (...) { VTDecompressionSessionInvalidate(session_); CFRelease(session_); session_ = nullptr; throw; }
     }
     ~HardwareDecoder() {
@@ -159,8 +175,8 @@ private:
 
 class DisplayFrames {
 public:
-    DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled)
-        : input_(input), cancelled_(cancelled), decoder_(input.info().video_format) {}
+    DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled, bool bob)
+        : input_(input), cancelled_(cancelled), decoder_(input.info().video_format, bob) {}
     std::unique_ptr<Frame> next() {
         while (!cancelled_) {
             if (!frames_.empty() && (eof_ || (CMTIME_IS_NUMERIC(watermark_) && CMTimeCompare(frames_.front()->pts, watermark_) <= 0))) {
@@ -213,7 +229,7 @@ private:
 class EncodedVideo {
 public:
     EncodedVideo(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
-        : input_(input), config_(std::move(config)), frames_(input, cancelled), cancelled_(cancelled) {
+        : input_(input), config_(std::move(config)), frames_(input, cancelled, config_.filter.bob), cancelled_(cancelled) {
         current_ = frames_.next();
         if (!current_) {
             if (!cancelled_) throw std::runtime_error("Input contains no displayable video frames");
@@ -226,7 +242,8 @@ public:
         std::optional<CFRef<CMVideoFormatDescriptionRef>> filtered_format;
         if (needs_gpu_filter(config_, pixel)) {
             filter_ = std::make_unique<GpuFilter>(make_filter_plan(config_, input_.info().video_format, pixel));
-            filtered_.emplace(filter_->process(pixel));
+            if (config_.filter.bob) first_field_ = bob_first_field(config_.filter.field_order, input_.info().video_format, pixel);
+            filtered_.emplace(filter_->process(pixel, config_.filter.bob ? static_cast<int>(first_field_) : -1));
             pixel = filtered_->get();
             config_.video.width = static_cast<int>(CVPixelBufferGetWidth(pixel));
             config_.video.height = static_cast<int>(CVPixelBufferGetHeight(pixel));
@@ -245,14 +262,21 @@ public:
     }
     CMSampleBufferRef next() {
         if (!current_ || cancelled_) return nullptr;
-        auto following = frames_.next();
+        if (field_index_ == 0) {
+            following_ = frames_.next();
+            if (cancelled_) return nullptr;
+            frame_duration_ = following_ ? CMTimeSubtract(following_->pts, current_->pts) : current_->duration;
+            require_time(frame_duration_, "video frame duration");
+            if (CMTimeCompare(frame_duration_, kCMTimeZero) <= 0) throw std::runtime_error("Video frame duration must be positive");
+            if (config_.filter.bob) first_field_ = bob_first_field(config_.filter.field_order, input_.info().video_format, current_->pixel.get());
+        }
         if (cancelled_) return nullptr;
-        const auto duration = following ? CMTimeSubtract(following->pts, current_->pts) : current_->duration;
-        require_time(duration, "video frame duration");
-        if (CMTimeCompare(duration, kCMTimeZero) <= 0) throw std::runtime_error("Video frame duration must be positive");
+        const auto timing = config_.filter.bob ? bob_time(current_->pts, frame_duration_, field_index_) : BobTime{current_->pts, frame_duration_};
+        const auto duration = timing.duration;
+        const auto pts = timing.pts;
         auto pixel = current_->pixel.get();
         if (filter_) {
-            if (!filtered_) filtered_.emplace(filter_->process(pixel));
+            if (!filtered_) filtered_.emplace(filter_->process(pixel, config_.filter.bob ? static_cast<int>(first_field_ ^ field_index_) : -1));
             pixel = filtered_->get();
             ++gpu_frames_;
         }
@@ -263,12 +287,12 @@ public:
         error_ = nullptr;
         output_.reset();
         VTEncodeInfoFlags flags = 0;
-        check_status(VTCompressionSessionEncodeFrame(session_.value, pixel, current_->pts, duration,
+        check_status(VTCompressionSessionEncodeFrame(session_.value, pixel, pts, duration,
             nullptr, nullptr, &flags), "Encode transcoded frame");
         check_status(VTCompressionSessionCompleteFrames(session_.value, kCMTimeInvalid), "Drain transcoded frame");
         if (error_) std::rethrow_exception(error_);
         if (!output_ || (flags & kVTEncodeInfo_FrameDropped)) throw std::runtime_error("Encoder dropped a transcoded frame");
-        if (CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(output_->get()), current_->pts) != 0 ||
+        if (CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(output_->get()), pts) != 0 ||
             CMTimeCompare(CMSampleBufferGetDuration(output_->get()), duration) != 0) {
             throw std::runtime_error("Encoder changed the source timeline");
         }
@@ -294,7 +318,8 @@ public:
             }
         }
         filtered_.reset();
-        current_ = std::move(following);
+        if (config_.filter.bob && field_index_ == 0) field_index_ = 1;
+        else { current_ = std::move(following_); field_index_ = 0; }
         CFRetain(output_->get());
         return output_->get();
     }
@@ -326,6 +351,9 @@ private:
     DisplayFrames frames_;
     const volatile std::sig_atomic_t& cancelled_;
     std::unique_ptr<Frame> current_;
+    std::unique_ptr<Frame> following_;
+    CMTime frame_duration_ = kCMTimeInvalid;
+    unsigned field_index_ = 0, first_field_ = 0;
     std::optional<CFRef<CMSampleBufferRef>> output_;
     std::exception_ptr error_;
 };
