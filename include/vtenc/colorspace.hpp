@@ -8,5 +8,6 @@ namespace vtenc {
 [[nodiscard]] std::array<float, 9> gamut_matrix(ColorPrimaries from, ColorPrimaries to);
 [[nodiscard]] std::array<float, 3> primaries_luma(ColorPrimaries primaries);
 [[nodiscard]] std::array<float, 2> matrix_coefficients(ColorMatrix matrix);
+void validate_tonemap(const ToneMapConfig& config);
 void parse_colorspace(std::string_view value, FilterConfig& filter);
 } // namespace vtenc

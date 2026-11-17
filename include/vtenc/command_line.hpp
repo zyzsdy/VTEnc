@@ -28,8 +28,18 @@ enum class ColorMatrix { automatic = 2, bt709 = 1, bt601 = 6, smpte240m = 7, bt2
 enum class ColorTransfer { automatic = 2, bt709 = 1, linear = 8, srgb = 13, pq = 16, hlg = 18 };
 enum class ColorPrimaries { automatic = 2, bt709 = 1, bt470bg = 5, smpte170m = 6,
                            bt2020 = 9, dci_p3 = 11, display_p3 = 12 };
+enum class ToneMap : unsigned { none, hable, mobius, reinhard, bt2390 };
+// Scalar-only layout also passed to Metal; keep in sync with ToneMapParameters.
+struct ToneMapConfig {
+    ToneMap mode = ToneMap::none;
+    float source_peak = 1000.0F, ldr_nits = 100.0F;
+    float desat_base = 0.18F, desat_strength = 0.75F, desat_exp = 1.5F;
+    std::array<float, 6> hable = {0.22F, 0.3F, 0.1F, 0.2F, 0.01F, 0.3F};
+    float transition = 0.3F, peak = 1.0F, contrast = 0.5F;
+};
 struct ColorspaceConfig {
     bool enabled = false;
+    ToneMapConfig tonemap;
     ColorTransfer input_transfer = ColorTransfer::automatic, output_transfer = ColorTransfer::automatic;
     ColorPrimaries input_primaries = ColorPrimaries::automatic, output_primaries = ColorPrimaries::automatic;
     bool scene_ref = false; // NVEnc defaults to display-referred BT.1886 for BT.709.

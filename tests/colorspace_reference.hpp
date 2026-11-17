@@ -78,27 +78,80 @@ inline double encode(double x, vtenc::ColorTransfer t, bool scene) {
     default: throw std::runtime_error("Unknown test transfer");
     }
 }
+// Reference uses the original NVEnc rational forms in double precision;
+// production Metal uses cancellation-resistant algebraic reductions.
+inline double tone_channel(double x, const vtenc::ToneMapConfig& t) {
+    using enum vtenc::ToneMap;
+    const double ratio=static_cast<double>(t.source_peak)/t.ldr_nits;
+    if (t.mode == hable) {
+        const auto h = [&](double v) {
+            const auto& p=t.hable;
+            return (v*(p[0]*v+p[2]*p[1])+p[3]*p[4])/(v*(p[0]*v+p[1])+p[3]*p[5])-static_cast<double>(p[4])/p[5];
+        };
+        return x == 0 ? 0 : h(x)/h(ratio);
+    }
+    if (t.mode == mobius) {
+        const double j=t.transition, peak=t.peak*ratio;
+        if (x <= j || peak == 1) return x;
+        const auto a=-j*j*(peak-1)/(j*j-2*j+peak);
+        const auto b=(j*j-2*j*peak+peak)/(peak-1);
+        return (b*b+2*b*j+j*j)/(b-a)*(x+a)/(x+b);
+    }
+    if (t.mode == reinhard) {
+        const double offset=(1.0-t.contrast)/t.contrast, peak=t.peak*ratio;
+        return x/(x+offset)*(peak+offset)/peak;
+    }
+    if (t.mode == bt2390) {
+        if (t.source_peak == t.ldr_nits) return x;
+        const auto pq = [](double v) { return encode(v*203/10000,vtenc::ColorTransfer::pq,false); };
+        const auto src=pq(t.source_peak), max_lum=pq(t.ldr_nits)/src;
+        auto v=pq(std::min(x*t.ldr_nits,static_cast<double>(t.source_peak)))/src;
+        const auto knee=1.5*max_lum-.5;
+        if (v >= knee) {
+            const auto z=(v-knee)/(1-knee);
+            v=(2*z*z*z-3*z*z+1)*knee+(z*z*z-2*z*z+z)*(1-knee)+(-2*z*z*z+3*z*z)*max_lum;
+        }
+        if (v <= 0) return 0;
+        const auto n=std::pow(v*src,32.0/2523);
+        return std::pow(std::max(n-3424.0/4096,0.0)/(2413.0/128-2392.0/128*n),4096.0*4/2610)*10000/203/t.ldr_nits;
+    }
+    return x;
+}
+inline V tonemap(V x, const vtenc::ToneMapConfig& t) {
+    if (t.mode == vtenc::ToneMap::none) return x;
+    V y{};
+    for (unsigned i=0; i<3; ++i) y[i]=tone_channel(x[i],t);
+    const double epsilon=t.mode == vtenc::ToneMap::bt2390 ? 1e-6/t.ldr_nits : 1e-6;
+    const auto in_max=std::max({x[0],x[1],x[2],epsilon});
+    const auto out_max=std::max({y[0],y[1],y[2],epsilon});
+    const auto coeff=std::max(out_max-t.desat_base,1e-6)/std::max(out_max,1.0);
+    const auto amount=std::clamp(t.desat_strength*std::pow(coeff,t.desat_exp),0.0,1.0);
+    for (unsigned i=0; i<3; ++i) x[i]=std::lerp(x[i]*out_max/in_max,y[i],amount);
+    return x;
+}
 inline V transform(V v, const vtenc::ColorspaceConfig& c) {
     using enum vtenc::ColorTransfer;
+    const double linear_peak = c.tonemap.mode == vtenc::ToneMap::none ? c.sdr_source_peak : c.tonemap.ldr_nits;
     for (auto& x : v) x = decode(x,c.input_transfer,c.scene_ref);
     double scale = 1;
-    if (c.input_transfer == pq) scale = 10000/c.sdr_source_peak;
+    if (c.input_transfer == pq) scale = 10000/linear_peak;
     if (c.input_transfer == hlg) {
-        scale = c.scene_ref ? 12 : 1000/c.sdr_source_peak;
+        scale = c.scene_ref ? 12 : 1000/linear_peak;
         if (!c.scene_ref) scale *= std::pow(std::max(mul(xyz(c.input_primaries),v)[1],1.175494351e-38),.2);
     }
     for (auto& x : v) x *= scale;
+    v = tonemap(v,c.tonemap);
     if (c.input_primaries != c.output_primaries) v = mul(rgb(c.output_primaries),mul(xyz(c.input_primaries),v));
     scale = 1;
-    if (c.output_transfer == pq) scale = c.sdr_source_peak/10000;
+    if (c.output_transfer == pq) scale = linear_peak/10000;
     if (c.output_transfer == hlg) {
-        scale = c.scene_ref ? 1.0/12 : c.sdr_source_peak/1000;
+        scale = c.scene_ref ? 1.0/12 : linear_peak/1000;
         if (!c.scene_ref) scale *= std::pow(std::max(mul(xyz(c.output_primaries),v)[1]*scale,1.175494351e-38),-1.0/6);
     }
     for (auto& x : v) x = encode(x*scale,c.output_transfer,c.scene_ref);
     return v;
 }
 inline bool nonlinear(const vtenc::ColorspaceConfig& c) {
-    return c.enabled && (c.input_transfer != c.output_transfer || c.input_primaries != c.output_primaries);
+    return c.enabled && (c.tonemap.mode != vtenc::ToneMap::none || c.input_transfer != c.output_transfer || c.input_primaries != c.output_primaries);
 }
 } // namespace color_reference

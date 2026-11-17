@@ -13,6 +13,7 @@ struct Parameters {
     float linear_peak;
     float gamut[9];
     float input_luma[3], output_luma[3];
+    ToneMapParameters tonemap;
 };
 // Explicit float interpolation avoids hardware sampler fractional-weight quantization
 // when converting 8-bit textures to 10-bit output.
@@ -61,6 +62,7 @@ float3 sample_yuv(texture2d<float, access::read> y, texture2d<float, access::rea
     if (p.convert_transfer) {
         float3 rgb = to_linear(float3(r, g, b), p.input_transfer, p.scene_ref, p.linear_peak,
             float3(p.input_luma[0], p.input_luma[1], p.input_luma[2]));
+        rgb = tone_map(rgb, p.tonemap);
         rgb = float3(dot(rgb, float3(p.gamut[0], p.gamut[1], p.gamut[2])),
                      dot(rgb, float3(p.gamut[3], p.gamut[4], p.gamut[5])),
                      dot(rgb, float3(p.gamut[6], p.gamut[7], p.gamut[8])));

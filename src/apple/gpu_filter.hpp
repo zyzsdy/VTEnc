@@ -23,10 +23,12 @@ struct FilterParameters {
     float linear_peak = 100.0F;
     float gamut[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     float input_luma[3] = {}, output_luma[3] = {};
+    ToneMapConfig tonemap;
 
 };
 static_assert(std::is_standard_layout_v<FilterParameters>);
-static_assert(sizeof(FilterParameters) == 184 && offsetof(FilterParameters, convert_transfer) == 104);
+static_assert(sizeof(ToneMapConfig) == 60 && offsetof(FilterParameters, tonemap) == 184);
+static_assert(sizeof(FilterParameters) == 244 && offsetof(FilterParameters, convert_transfer) == 104);
 struct FilterPlan {
     int input_width, input_height, width, height;
     OSType input_format, output_format;

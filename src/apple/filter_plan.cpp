@@ -103,23 +103,30 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
                      CFEqual(transfer, kCVImageBufferTransferFunction_ITU_R_2100_HLG))) {
         throw std::runtime_error("HDR filtering requires explicit --vpp-colorspace conversion");
     }
+    const auto& color = config.filter.colorspace;
+    const bool tone = color.tonemap.mode != ToneMap::none;
+    validate_tonemap(color.tonemap);
     auto input_matrix = config.filter.input_matrix;
     if (input_matrix == ColorMatrix::automatic) input_matrix = matrix_value(metadata(format, source_attachments.get(), kCVImageBufferYCbCrMatrixKey));
     auto output_matrix = config.filter.output_matrix;
-    if (output_matrix == ColorMatrix::automatic) output_matrix = input_matrix;
+    if (output_matrix == ColorMatrix::automatic) output_matrix = tone ? ColorMatrix::bt709 : input_matrix;
     if (output_matrix != ColorMatrix::automatic && input_matrix == ColorMatrix::automatic) {
         throw std::runtime_error("Missing or unsupported source YCbCr matrix; specify --vpp-colorspace matrix=FROM:TO or --input-matrix");
     }
     if (output_matrix != ColorMatrix::automatic) CFDictionarySetValue(attachments.get(), kCVImageBufferYCbCrMatrixKey, matrix_name(output_matrix));
-    const auto& color = config.filter.colorspace;
     auto in_transfer = color.input_transfer;
     if (in_transfer == ColorTransfer::automatic) in_transfer = transfer_value(transfer);
-    const auto out_transfer = color.output_transfer == ColorTransfer::automatic ? in_transfer : color.output_transfer;
+    const auto out_transfer = color.output_transfer == ColorTransfer::automatic ? (tone ? ColorTransfer::bt709 : in_transfer) : color.output_transfer;
     auto in_primaries = color.input_primaries;
     if (in_primaries == ColorPrimaries::automatic)
         in_primaries = primaries_value(metadata(format, source_attachments.get(), kCVImageBufferColorPrimariesKey));
-    const auto out_primaries = color.output_primaries == ColorPrimaries::automatic ? in_primaries : color.output_primaries;
-    const bool linear = in_transfer != out_transfer || in_primaries != out_primaries;
+    const auto out_primaries = color.output_primaries == ColorPrimaries::automatic ? (tone ? ColorPrimaries::bt709 : in_primaries) : color.output_primaries;
+    const bool linear = tone || in_transfer != out_transfer || in_primaries != out_primaries;
+    if (tone && color.scene_ref) throw std::runtime_error("hdr2sdr requires scene_ref=false (display luminance)");
+    if (tone && in_transfer != ColorTransfer::pq && in_transfer != ColorTransfer::hlg)
+        throw std::runtime_error("hdr2sdr requires known PQ or HLG input transfer; specify transfer=FROM:TO");
+    if (tone && (out_transfer == ColorTransfer::pq || out_transfer == ColorTransfer::hlg))
+        throw std::runtime_error("hdr2sdr requires an SDR output transfer");
     if (linear && (in_transfer == ColorTransfer::automatic || out_transfer == ColorTransfer::automatic))
         throw std::runtime_error("Missing or unsupported source transfer; specify --vpp-colorspace transfer=FROM:TO");
     if (linear && (input_matrix == ColorMatrix::automatic || output_matrix == ColorMatrix::automatic))
@@ -127,12 +134,12 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
     if (in_primaries != out_primaries && (in_primaries == ColorPrimaries::automatic || out_primaries == ColorPrimaries::automatic))
         throw std::runtime_error("Missing or unsupported source primaries; specify --vpp-colorspace colorprim=FROM:TO");
     if (color.enabled) {
-        if (out_transfer != ColorTransfer::automatic && (color.input_transfer != ColorTransfer::automatic || color.output_transfer != ColorTransfer::automatic)) {
+        if (out_transfer != ColorTransfer::automatic && (tone || color.input_transfer != ColorTransfer::automatic || color.output_transfer != ColorTransfer::automatic)) {
             const auto name = CVTransferFunctionGetStringForIntegerCodePoint(static_cast<int>(out_transfer));
             if (!name) throw std::runtime_error("CoreVideo cannot represent output transfer");
             CFDictionarySetValue(attachments.get(), kCVImageBufferTransferFunctionKey, name);
         }
-        if (out_primaries != ColorPrimaries::automatic && (color.input_primaries != ColorPrimaries::automatic || color.output_primaries != ColorPrimaries::automatic)) {
+        if (out_primaries != ColorPrimaries::automatic && (tone || color.input_primaries != ColorPrimaries::automatic || color.output_primaries != ColorPrimaries::automatic)) {
             const auto name = CVColorPrimariesGetStringForIntegerCodePoint(static_cast<int>(out_primaries));
             if (!name) throw std::runtime_error("CoreVideo cannot represent output primaries");
             CFDictionarySetValue(attachments.get(), kCVImageBufferColorPrimariesKey, name);
@@ -195,7 +202,8 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
     p.convert_matrix = input_matrix != output_matrix || linear;
     p.convert_transfer = linear;
     p.input_transfer = static_cast<unsigned>(in_transfer); p.output_transfer = static_cast<unsigned>(out_transfer);
-    p.scene_ref = color.scene_ref; p.linear_peak = color.sdr_source_peak;
+    p.scene_ref = color.scene_ref; p.linear_peak = tone ? color.tonemap.ldr_nits : color.sdr_source_peak;
+    p.tonemap = color.tonemap;
     if (in_primaries != out_primaries) {
         const auto gamut = gamut_matrix(in_primaries, out_primaries);
         std::copy(gamut.begin(), gamut.end(), p.gamut);

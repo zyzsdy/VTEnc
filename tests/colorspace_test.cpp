@@ -47,6 +47,38 @@ int main() try {
         parsed.colorspace.input_primaries == ColorPrimaries::bt2020 && parsed.colorspace.output_primaries == ColorPrimaries::bt709 &&
         parsed.colorspace.scene_ref && parsed.colorspace.sdr_source_peak == 203, "Colorspace option did not populate conversion endpoints");
 
+    // Golden vectors evaluated independently with 60-digit decimal arithmetic
+    // from the NVEnc equations (including its BT.2390 203 reference white).
+    constexpr double values[4][5] = {
+        {0,.10110297981581827,.4682983508245877,.8505512097507731,1},
+        {0,.18,.6631016042780749,.9266650037415815,1},
+        {0,.16779661016949152,.55,.88,1},
+        {0,.18,.7296599267392758,.9828647914843555,1}
+    };
+    constexpr double inputs[] = {0,.18,1,4,10};
+    for (auto mode : {ToneMap::hable,ToneMap::mobius,ToneMap::reinhard,ToneMap::bt2390}) {
+        ToneMapConfig tone; tone.mode=mode;
+        validate_tonemap(tone);
+        for (unsigned i=0; i<5; ++i)
+            require(std::abs(color_reference::tone_channel(inputs[i],tone)-values[static_cast<unsigned>(mode)-1][i]) < 1e-7, "Tone reference differs from decimal golden vector");
+        double previous=-1;
+        for (unsigned i=0; i<=1000; ++i) {
+            const auto value=color_reference::tone_channel(static_cast<double>(i)/10,tone);
+            require(std::isfinite(value) && value >= previous-1e-10, "Tone curve is nonfinite or reverses highlights");
+            previous=value;
+        }
+        tone.desat_strength=0;
+        const auto color=color_reference::tonemap({4,1,.25},tone);
+        require(std::abs(color[0]/color[1]-4) < 1e-10 && std::abs(color[1]/color[2]-4) < 1e-10, "Disabled desaturation changed RGB ratios");
+        const auto black=color_reference::tonemap({0,0,0},tone);
+        require(black == color_reference::V{}, "Tone mapping raised black");
+    }
+    FilterConfig tone_args;
+    parse_colorspace("hdr2sdr=hable,source_peak=4000,ldr_nits=203,a=0.3,b=0.4,c=0.2,d=0.3,e=0.02,f=0.4,desat_base=0.1,desat_strength=1,desat_exp=0.5",tone_args);
+    const auto& t=tone_args.colorspace.tonemap;
+    require(t.mode == ToneMap::hable && t.source_peak == 4000 && t.ldr_nits == 203 && t.hable[0] == .3F &&
+        t.hable[5] == .4F && t.desat_base == .1F && t.desat_strength == 1 && t.desat_exp == .5F, "Tone parameters were ignored");
+
     CVPixelBufferRef raw_pixel = nullptr;
     check_status(CVPixelBufferCreate(nullptr,16,16,kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,nullptr,&raw_pixel), "Create metadata fixture");
     CFRef pixel(raw_pixel);
@@ -75,6 +107,26 @@ int main() try {
     require(plan.parameters.convert_transfer && plan.parameters.input_transfer == 16 && plan.parameters.output_transfer == 1, "HDR metadata auto resolution failed");
     require(!CFDictionaryContainsKey(plan.attachments.get(),kCVImageBufferMasteringDisplayColorVolumeKey) &&
         !CFDictionaryContainsKey(plan.attachments.get(),kCVImageBufferContentLightLevelInfoKey), "Stale HDR metadata propagated");
+    EncodeConfig tone_config;
+    tone_config.video.bit_depth=10; tone_config.filter.input_chroma=ChromaLocation::left;
+    parse_colorspace("hdr2sdr=bt2390,source_peak=4000,ldr_nits=203",tone_config.filter);
+    auto tone_plan=make_filter_plan(tone_config,format().get(),pixel.get());
+    require(tone_plan.parameters.tonemap.mode == ToneMap::bt2390 && tone_plan.parameters.linear_peak == 203 &&
+        tone_plan.parameters.input_transfer == 16 && tone_plan.parameters.output_transfer == 1 &&
+        tone_plan.parameters.convert_transfer, "Tone planner did not select display luminance and SDR transfer");
+    for (const auto pair : {std::pair{kCVImageBufferColorPrimariesKey,kCVImageBufferColorPrimaries_ITU_R_709_2},
+                           std::pair{kCVImageBufferYCbCrMatrixKey,kCVImageBufferYCbCrMatrix_ITU_R_709_2},
+                           std::pair{kCVImageBufferTransferFunctionKey,kCVImageBufferTransferFunction_ITU_R_709_2}}) {
+        const auto value=CFDictionaryGetValue(tone_plan.attachments.get(),pair.first);
+        require(value && CFEqual(value,pair.second), "hdr2sdr default output retained HDR labels");
+    }
+    require(!CFDictionaryContainsKey(tone_plan.attachments.get(),kCVImageBufferMasteringDisplayColorVolumeKey) &&
+        !CFDictionaryContainsKey(tone_plan.attachments.get(),kCVImageBufferContentLightLevelInfoKey), "Tone mapping retained HDR side data");
+    tone_config.filter.colorspace.input_transfer=ColorTransfer::bt709;
+    rejects([&] { (void)make_filter_plan(tone_config,format().get(),pixel.get()); }, "PQ or HLG input");
+    tone_config.filter.colorspace.input_transfer=ColorTransfer::automatic;
+    tone_config.filter.colorspace.output_transfer=ColorTransfer::pq;
+    rejects([&] { (void)make_filter_plan(tone_config,format().get(),pixel.get()); }, "SDR output");
     const auto explicit_plan = plan.parameters;
     config.filter.colorspace.input_transfer = ColorTransfer::pq;
     config.filter.colorspace.input_primaries = ColorPrimaries::bt2020;

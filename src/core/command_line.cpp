@@ -301,7 +301,8 @@ Matrix conversion changes YCbCr coefficients only, preserving primaries and tran
 Missing matrix/chroma metadata requires an explicit input override when needed.
 --vpp-colorspace uses NVEnc-style matrix=FROM:TO,transfer=FROM:TO,
 colorprim=FROM:TO,range=FROM:TO pairs. Source auto reads frame/track metadata;
-destination auto preserves the resolved source. Missing required metadata fails.
+destination auto preserves the resolved source (hdr2sdr defaults to BT.709).
+Missing required source metadata fails.
 Matrix: bt601 (smpte170m/bt470bg), bt709, smpte240m, bt2020nc (bt2020).
 Transfer: bt709 (smpte170m/bt2020-10/bt2020-12), linear, srgb (iec61966-2-1),
 smpte2084 (pq), arib-std-b67 (hlg). Primaries: bt709, smpte170m (smpte240m),
@@ -310,8 +311,22 @@ All four pairs accept auto. scene_ref=true|false defaults false: BT.709 uses
 BT.1886 display gamma 2.4; true uses the BT.709 scene OETF. sdr_source_peak=100
 sets linear-light reference luminance in cd/m2; valid range [0.01,10000].
 Cannot combine --vpp-colorspace with --input-matrix/--output-matrix/--output-range.
-HDR input requires explicit --vpp-colorspace. This is colorimetric conversion:
-no tone mapping, LUT3D, gamut compression, dithering or antialiasing downscale.
+HDR input requires explicit --vpp-colorspace. hdr2sdr=none|hable|mobius|reinhard|
+bt2390 enables display-referred PQ/HLG -> SDR tone mapping before gamut conversion.
+Defaults: hdr2sdr=none, source_peak=1000, ldr_nits=100 (cd/m2), desat_base=0.18,
+desat_strength=0.75, desat_exp=1.5. Source peak is explicit, not read from MaxCLL.
+Hable a=0.22,b=0.3,c=0.1,d=0.2,e=0.01,f=0.3; Mobius transition=0.3,peak=1;
+Reinhard contrast=0.5,peak=1. Curves accept only their own tuning parameters.
+Require 1 <= ldr_nits <= source_peak <= 10000; desat_base/strength in [0,1],
+desat_exp in [0.01,10], transition in [0,0.999], contrast in [0.001,0.999],
+peak in [0.001,100] (Mobius peak*source_peak/ldr_nits >= 1).
+Hable requires a,e in [0,10], b,d,f in [0.0001,10], e<f, e/f<=c<=1 and a
+nonzero curve. hdr2sdr requires scene_ref=false and normalizes linear RGB to
+ldr_nits; explicit sdr_source_peak must equal ldr_nits. Auto matrix/primaries/
+transfer output becomes BT.709; range still inherits source. HDR output is rejected.
+BT.2390 retains NVEnc's 203 reference-white scale; values above source_peak clamp
+before the Hermite shoulder. Without hdr2sdr, HDR->SDR is clipping-only conversion.
+No LUT3D, gamut compression, dithering or antialiasing downscale.
 Out-of-range output clips at quantization; HDR mastering/content-light metadata
 is removed after filtering. RGB and constant-luminance YCbCr are unsupported.
 Interlaced input requires explicit --deinterlace bob (Metal, two outputs

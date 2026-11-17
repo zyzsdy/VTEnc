@@ -78,3 +78,71 @@ float3 from_linear(float3 v, uint transfer, bool scene, float peak, float3 luma)
     }
     return float3(encode_channel(v.r, transfer, scene), encode_channel(v.g, transfer, scene), encode_channel(v.b, transfer, scene));
 }
+
+// NVEnc HDR2SDR curves and highlight desaturation (rigaya, MIT).
+// See THIRD_PARTY_NOTICES.md. Keep layout synchronized with ToneMapConfig.
+struct ToneMapParameters {
+    uint mode;
+    float source_peak, ldr_nits;
+    float desat_base, desat_strength, desat_exp;
+    float hable[6];
+    float transition, peak, contrast;
+};
+float hable_curve(float x, constant ToneMapParameters& t) {
+    float a=t.hable[0], b=t.hable[1], c=t.hable[2], d=t.hable[3], e=t.hable[4], f=t.hable[5];
+    // Algebraically identical to NVEnc's rational expression minus e/f,
+    // without cancellation at black. Host rejects nonmonotonic/zero curves.
+    return x * (a * (1.0f-e/f) * x + b * (c-e/f)) / (x*(a*x+b)+d*f);
+}
+float bt2390_pq_decode(float x) {
+    if (x <= 0.0f) return 0.0f;
+    // NVEnc's BT.2390 helper uses a 203 cd/m2 reference-white multiplier;
+    // its PQ values can exceed 1. Do not use the input-signal-clamping decoder.
+    float v=pow(x,1.0f/pq_m2);
+    return pow(max(v-pq_c1,0.0f)/(pq_c2-pq_c3*v),1.0f/pq_m1)*10000.0f/203.0f;
+}
+float tone_channel(float x, constant ToneMapParameters& t) {
+    float ratio=t.source_peak/t.ldr_nits;
+    if (t.mode == 1) return hable_curve(x,t)/hable_curve(ratio,t);
+    if (t.mode == 2) {
+        float transition=t.transition;
+        if (x <= transition) return x;
+        float peak=t.peak*ratio, q=peak-1.0f, u=1.0f-transition, h=x-transition;
+        float base=u*(peak-transition), d=u*u+q;
+        // Reduced NVEnc Mobius rational form: avoids division by peak-1,
+        // remains continuous (identity) at peak=1, and has no pole for x>t.
+        return (transition*base+d*h)/(base+q*h);
+    }
+    if (t.mode == 3) {
+        float offset=(1.0f-t.contrast)/t.contrast, peak=t.peak*ratio;
+        return x/(x+offset)*(peak+offset)/peak;
+    }
+    if (t.mode == 4) {
+        if (t.source_peak == t.ldr_nits) return x;
+        float src=pq_encode(t.source_peak*203.0f/10000.0f);
+        float dst=pq_encode(t.ldr_nits*203.0f/10000.0f)/src;
+        if (dst >= 1.0f) return min(x,ratio); // Vanishing shoulder; retain the source-peak clamp.
+        // Clamp at the declared source peak: Hermite extrapolation outside
+        // [0,1] can reverse the shoulder and turn over-range highlights dark.
+        float v=pq_encode(min(x*t.ldr_nits,t.source_peak)*203.0f/10000.0f)/src;
+        float knee=1.5f*dst-0.5f;
+        if (v >= knee) {
+            float z=(v-knee)/(1.0f-knee), z2=z*z, z3=z2*z;
+            v=(2.0f*z3-3.0f*z2+1.0f)*knee + (z3-2.0f*z2+z)*(1.0f-knee) + (-2.0f*z3+3.0f*z2)*dst;
+        }
+        return bt2390_pq_decode(v*src)/t.ldr_nits;
+    }
+    return x;
+}
+float3 tone_map(float3 x, constant ToneMapParameters& t) {
+    if (!t.mode) return x;
+    // PQ/HLG EOTFs produce nonnegative source-linear RGB; gamut conversion
+    // follows this operation, so negative out-of-gamut values cannot hit poles.
+    float3 y(tone_channel(x.r,t),tone_channel(x.g,t),tone_channel(x.b,t));
+    float epsilon=t.mode == 4 ? 1e-6f/t.ldr_nits : 1e-6f;
+    float in_max=max(max(x.r,x.g),max(x.b,epsilon));
+    float out_max=max(max(y.r,y.g),max(y.b,epsilon));
+    float coeff=max(out_max-t.desat_base,1e-6f)/max(out_max,1.0f);
+    float amount=clamp(t.desat_strength*pow(coeff,t.desat_exp),0.0f,1.0f);
+    return mix(x*(out_max/in_max),y,amount);
+}

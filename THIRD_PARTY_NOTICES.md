@@ -3,7 +3,8 @@
 ## NVEnc colorspace algorithms
 
 `src/core/colorspace.cpp` and `src/apple/shaders/colorspace.metal` adapt matrix,
-white-point adaptation and transfer-function algorithms from
+white-point adaptation, transfer functions, HDR2SDR tone-mapping curves and
+highlight desaturation algorithms from
 [rigaya/NVEnc](https://github.com/rigaya/NVEnc), revision
 `5bb35d860bc5f877b01fe60e4de5ac756b9b80ed`, specifically
 `NVEncCore/NVEncFilterColorspace.cpp` and `NVEncCore/NVEncFilterColorspaceFunc.h`.

@@ -97,6 +97,14 @@ ColorRange range(std::string_view s) {
     if (s == "full") return ColorRange::full;
     invalid("range", s);
 }
+float number(std::string_view key, std::string_view value, float low, float high) {
+    float result = 0;
+    std::istringstream parser{std::string(value)};
+    parser.imbue(std::locale::classic()); parser >> std::noskipws >> result;
+    if (!parser || parser.peek() != std::char_traits<char>::eof() || !std::isfinite(result) || result < low || result > high)
+        throw std::invalid_argument("--vpp-colorspace " + std::string(key) + " requires a finite number in [" + std::to_string(low) + "," + std::to_string(high) + "]");
+    return result;
+}
 template<class T, class Parse> void pair(std::string_view key, std::string_view value, T& from, T& to, Parse parse) {
     const auto colon = value.find(':');
     if (colon == std::string_view::npos || colon == 0 || colon + 1 == value.size())
@@ -135,6 +143,39 @@ std::array<float, 9> gamut_matrix(ColorPrimaries from, ColorPrimaries to) {
     return out;
 }
 
+void validate_tonemap(const ToneMapConfig& t) {
+    if (t.mode == ToneMap::none) return;
+    const auto range = [](float x, float low, float high) { return std::isfinite(x) && x >= low && x <= high; };
+    if (!range(t.source_peak,1,10000) || !range(t.ldr_nits,1,10000) || t.source_peak < t.ldr_nits)
+        throw std::invalid_argument("hdr2sdr requires 1 <= ldr_nits <= source_peak <= 10000 cd/m2");
+    if (!range(t.desat_base,0,1) || !range(t.desat_strength,0,1) || !range(t.desat_exp,0.01F,10))
+        throw std::invalid_argument("Invalid hdr2sdr desaturation parameters");
+    switch (t.mode) {
+    case ToneMap::hable: {
+        const auto& h = t.hable;
+        if (!range(h[0],0,10) || !range(h[1],0.0001F,10) || !range(h[2],0,1) ||
+            !range(h[3],0.0001F,10) || !range(h[4],0,10) || !range(h[5],0.0001F,10) ||
+            h[4] >= h[5] || h[2] < h[4]/h[5])
+            throw std::invalid_argument("Invalid Hable coefficients: require e < f and e/f <= c <= 1, with b,d,f > 0");
+        const double x = static_cast<double>(t.source_peak)/t.ldr_nits, ef = static_cast<double>(h[4])/h[5];
+        const auto white = x*(h[0]*(1-ef)*x+h[1]*(h[2]-ef))/(x*(h[0]*x+h[1])+h[3]*h[5]);
+        if (white < 1e-8) throw std::invalid_argument("Degenerate Hable curve: source peak maps to zero");
+        break;
+    }
+    case ToneMap::mobius:
+        if (!range(t.transition,0,0.999F) || !range(t.peak,0.001F,100) ||
+            static_cast<double>(t.peak)*t.source_peak/t.ldr_nits < 1)
+            throw std::invalid_argument("Mobius requires transition in [0,0.999] and peak*source_peak/ldr_nits >= 1");
+        break;
+    case ToneMap::reinhard:
+        if (!range(t.contrast,0.001F,0.999F) || !range(t.peak,0.001F,100))
+            throw std::invalid_argument("Reinhard requires contrast in [0.001,0.999] and peak in [0.001,100]");
+        break;
+    case ToneMap::bt2390: break;
+    default: throw std::invalid_argument("Unknown tone mapping mode");
+    }
+}
+
 void parse_colorspace(std::string_view value, FilterConfig& f) {
     auto& c = f.colorspace;
     c.enabled = true; f.requested = true;
@@ -152,19 +193,50 @@ void parse_colorspace(std::string_view value, FilterConfig& f) {
         else if (equal == "scene_ref") {
             if (arg != "true" && arg != "false") invalid(equal, arg);
             c.scene_ref = arg == "true";
-        } else if (equal == "sdr_source_peak") {
-            float peak = 0;
-            std::istringstream parser{std::string(arg)};
-            parser.imbue(std::locale::classic());
-            parser >> std::noskipws >> peak;
-            if (!parser || parser.peek() != std::char_traits<char>::eof() || !std::isfinite(peak) || peak < 0.01F || peak > 10000)
-                throw std::invalid_argument("--vpp-colorspace sdr_source_peak requires a finite number in [0.01,10000]");
-            c.sdr_source_peak = peak;
-        } else invalid(equal, arg);
+        } else if (equal == "hdr2sdr") {
+            if (arg == "none") c.tonemap.mode = ToneMap::none;
+            else if (arg == "hable") c.tonemap.mode = ToneMap::hable;
+            else if (arg == "mobius") c.tonemap.mode = ToneMap::mobius;
+            else if (arg == "reinhard") c.tonemap.mode = ToneMap::reinhard;
+            else if (arg == "bt2390") c.tonemap.mode = ToneMap::bt2390;
+            else invalid(equal,arg);
+        } else if (equal == "sdr_source_peak") c.sdr_source_peak = number(equal,arg,0.01F,10000);
+        else if (equal == "source_peak") c.tonemap.source_peak = number(equal,arg,1,10000);
+        else if (equal == "ldr_nits") c.tonemap.ldr_nits = number(equal,arg,1,10000);
+        else if (equal == "desat_base") c.tonemap.desat_base = number(equal,arg,0,1);
+        else if (equal == "desat_strength") c.tonemap.desat_strength = number(equal,arg,0,1);
+        else if (equal == "desat_exp") c.tonemap.desat_exp = number(equal,arg,0.01F,10);
+        else if (equal == "transition") c.tonemap.transition = number(equal,arg,0,0.999F);
+        else if (equal == "peak") c.tonemap.peak = number(equal,arg,0.001F,100);
+        else if (equal == "contrast") c.tonemap.contrast = number(equal,arg,0.001F,0.999F);
+        else if (equal.size() == 1 && equal[0] >= 'a' && equal[0] <= 'f')
+            c.tonemap.hable[static_cast<std::size_t>(equal[0]-'a')] = number(equal,arg,0,10);
+        else invalid(equal, arg);
         if (comma == std::string_view::npos) break;
         value.remove_prefix(comma + 1);
         if (value.empty()) throw std::invalid_argument("Trailing comma in --vpp-colorspace");
     }
+    const auto mode = c.tonemap.mode;
+    for (const auto key : {"source_peak", "ldr_nits", "desat_base", "desat_strength", "desat_exp", "a", "b", "c", "d", "e", "f", "transition", "peak", "contrast"}) {
+        if (!seen.contains(key)) continue;
+        if (mode == ToneMap::none) throw std::invalid_argument(std::string(key) + " requires enabled hdr2sdr");
+        const std::string_view name(key);
+        if (name.size() == 1 && mode != ToneMap::hable) throw std::invalid_argument(std::string(key) + " requires hdr2sdr=hable");
+        if (name == "transition" && mode != ToneMap::mobius) throw std::invalid_argument("transition requires hdr2sdr=mobius");
+        if (name == "contrast" && mode != ToneMap::reinhard) throw std::invalid_argument("contrast requires hdr2sdr=reinhard");
+        if (name == "peak" && mode != ToneMap::mobius && mode != ToneMap::reinhard)
+            throw std::invalid_argument("peak requires hdr2sdr=mobius or reinhard");
+    }
+    if (mode != ToneMap::none) {
+        if (c.scene_ref) throw std::invalid_argument("hdr2sdr requires scene_ref=false (display luminance)");
+        if (seen.contains("sdr_source_peak") && c.sdr_source_peak != c.tonemap.ldr_nits)
+            throw std::invalid_argument("With hdr2sdr, sdr_source_peak must equal ldr_nits; prefer ldr_nits alone");
+        if (c.input_transfer != ColorTransfer::automatic && c.input_transfer != ColorTransfer::pq && c.input_transfer != ColorTransfer::hlg)
+            throw std::invalid_argument("hdr2sdr requires PQ or HLG input transfer");
+        if (c.output_transfer == ColorTransfer::pq || c.output_transfer == ColorTransfer::hlg)
+            throw std::invalid_argument("hdr2sdr requires an SDR output transfer");
+    }
+    validate_tonemap(c.tonemap);
     if (seen.empty()) throw std::invalid_argument("Empty --vpp-colorspace");
 }
 } // namespace vtenc

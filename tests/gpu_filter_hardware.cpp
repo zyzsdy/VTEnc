@@ -283,6 +283,93 @@ int main() try {
         }
     }
     std::cout << "PASS " << color_cases << " colorspace pixel cases; maximum error=" << color_error << " code value\n";
+    int tone_cases=0, tone_error=0;
+    for (int depth : {8,10}) for (bool full : {false,true}) {
+        Image fixture{18,16,depth,full,{}};
+        const int max=depth == 10 ? 1023 : 255;
+        for (int plane=0; plane<3; ++plane) {
+            const int w=plane ? 9 : 18, h=plane ? 8 : 16;
+            for (int y=0; y<h; ++y) for (int x=0; x<w; ++x)
+                fixture.planes[static_cast<std::size_t>(plane)].push_back((x*67+y*29+plane*101) % (max+1));
+        }
+        auto pixel=pixel_buffer(fixture);
+        CMVideoFormatDescriptionRef raw=nullptr;
+        check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr,pixel.get(),&raw), "Describe tone mapping fixture");
+        CFRef format(raw);
+        for (auto mode : {ToneMap::hable,ToneMap::mobius,ToneMap::reinhard,ToneMap::bt2390})
+        for (auto transfer : {ColorTransfer::pq,ColorTransfer::hlg}) for (int variant=0; variant<5; ++variant) {
+            EncodeConfig config;
+            config.video.bit_depth=variant == 1 ? (depth == 8 ? 10 : 8) : depth;
+            config.filter.range=full ? ColorRange::full : ColorRange::limited;
+            config.filter.input_chroma=ChromaLocation::left;
+            config.filter.input_matrix=ColorMatrix::bt2020nc; config.filter.output_matrix=ColorMatrix::bt709;
+            auto& color=config.filter.colorspace;
+            color.enabled=true; color.input_transfer=transfer; color.output_transfer=ColorTransfer::bt709;
+            color.input_primaries=ColorPrimaries::bt2020; color.output_primaries=ColorPrimaries::bt709;
+            auto& tone=color.tonemap; tone.mode=mode;
+            if (variant == 1) {
+                tone.source_peak=4000; tone.ldr_nits=203; tone.desat_strength=1;
+                tone.desat_base=.1F; tone.desat_exp=.5F;
+                tone.hable={.3F,.4F,.2F,.3F,.02F,.4F}; tone.transition=.6F; tone.peak=2; tone.contrast=.7F;
+                config.filter.crop={2,4,4,4}; config.filter.output_size={10,6};
+            } else if (variant == 2) {
+                tone.source_peak=tone.ldr_nits=100; tone.desat_strength=0;
+            } else if (variant == 3) {
+                tone.source_peak=10000; tone.ldr_nits=1;
+                config.filter.bob=true; config.filter.crop={2,4,4,4}; config.filter.output_size={26,18};
+            } else if (variant == 4) {
+                tone.source_peak=100.001F; tone.ldr_nits=100;
+                tone.transition=.999F; tone.contrast=.999F;
+                tone.hable={0,1,1,1,0,1};
+            }
+            GpuFilter filter(make_filter_plan(config,format.get(),pixel.get()));
+            for (int field=0; field<(config.filter.bob ? 2 : 1); ++field) {
+                const int parity=config.filter.bob ? field : -1;
+                auto output=filter.process(pixel.get(),parity);
+                const auto error=verify(fixture,output.get(),config,true,parity);
+                if (error > 1) throw std::runtime_error("Tone mapping mismatch: " + std::to_string(error) +
+                    " mode=" + std::to_string(static_cast<int>(mode)) + " variant=" + std::to_string(variant) +
+                    " transfer=" + std::to_string(static_cast<int>(transfer)) + " depth=" + std::to_string(depth));
+                tone_error=std::max(tone_error,error); ++tone_cases;
+            }
+        }
+    }
+    // Neutral PQ luminance ramp checks actual GPU black, monotonic highlight
+    // compression and near-black/100-nit/1000-nit anchors after quantization.
+    Image gray{18,16,10,false,{}};
+    constexpr double nits[] = {0,.001,.01,.1,1,5,18,50,100,200,400,600,800,1000,2000,4000,8000,10000};
+    for (int y=0; y<16; ++y) for (auto luminance : nits)
+        gray.planes[0].push_back(std::round(64+876*color_reference::encode(luminance/10000,ColorTransfer::pq,false)));
+    gray.planes[1].assign(72,512); gray.planes[2].assign(72,512);
+    auto gray_pixel=pixel_buffer(gray);
+    CMVideoFormatDescriptionRef gray_raw=nullptr;
+    check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr,gray_pixel.get(),&gray_raw), "Describe PQ ramp");
+    CFRef gray_format(gray_raw);
+    for (auto mode : {ToneMap::hable,ToneMap::mobius,ToneMap::reinhard,ToneMap::bt2390}) for (int depth : {8,10}) {
+        EncodeConfig config;
+        config.video.bit_depth=depth; config.filter.range=ColorRange::limited;
+        config.filter.input_chroma=ChromaLocation::left;
+        config.filter.input_matrix=ColorMatrix::bt2020nc; config.filter.output_matrix=ColorMatrix::bt709;
+        auto& color=config.filter.colorspace;
+        color.enabled=true; color.tonemap.mode=mode;
+        color.input_transfer=ColorTransfer::pq; color.output_transfer=ColorTransfer::bt709;
+        color.input_primaries=ColorPrimaries::bt2020; color.output_primaries=ColorPrimaries::bt709;
+        GpuFilter filter(make_filter_plan(config,gray_format.get(),gray_pixel.get()));
+        auto output=filter.process(gray_pixel.get());
+        const auto error=verify(gray,output.get(),config,true);
+        require(error <= 1, "Tone mapping luminance anchors differ from reference");
+        check_status(CVPixelBufferLockBaseAddress(output.get(),kCVPixelBufferLock_ReadOnly), "Read tone ramp");
+        const auto row=static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(output.get(),0));
+        int previous=0;
+        for (int x=0; x<18; ++x) {
+            const int code=depth == 8 ? row[x] : reinterpret_cast<const std::uint16_t*>(row)[x] >> 6;
+            require(x != 0 || code == (depth == 8 ? 16 : 64), "Tone mapping raised GPU black");
+            require(code >= previous, "GPU tone curve reversed highlight luminance"); previous=code;
+        }
+        check_status(CVPixelBufferUnlockBaseAddress(output.get(),kCVPixelBufferLock_ReadOnly), "Unlock tone ramp");
+        tone_error=std::max(tone_error,error); ++tone_cases;
+    }
+    std::cout << "PASS " << tone_cases << " tone mapping pixel cases; maximum error=" << tone_error << " code value\n";
     int bob_cases = 0, bob_error = 0;
     for (int depth : {8, 10}) for (bool full : {false, true}) {
         Image fixture{18, 16, depth, full, {}};

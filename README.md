@@ -16,7 +16,7 @@
 - 平均码率目标或原生 Quality、GOP 上限、整数有理数帧率；Annex B 输出及逐帧时间戳 CSV。
 - 压缩输入统一交给 `libavformat` 自动探测，不设格式或扩展名白名单；支持实测 MKV、TS、WebM、MP4/MOV 等，探测失败直接报错。原生 VideoToolbox 硬解或 `libavcodec` 软解，原生硬编，avformat 根据输出文件名选择封装器，或由 `-f` / `--output-format` 显式指定；默认复制第一条音轨。
 - 文件转码将源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换传入封装器，精度与元数据保存取决于目标格式；支持 `hev1` 描述适配。
-- Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709/BT.2020 NCL/SMPTE 240M 矩阵转换，以及 `--vpp-colorspace` 线性光色域、传递函数转换。
+- Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709/BT.2020 NCL/SMPTE 240M 矩阵转换，以及 `--vpp-colorspace` 线性光色域、传递函数转换，以及 Hable / Mobius / Reinhard / BT.2390 HDR→SDR tone mapping。
 - Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010、硬解或软解的文件输入。两个原始交错样片在本机无法硬解，可用软解接入 Metal Bob。
 - 有界回调和重排队列、背压和排空；SIGINT 取消、失败清理、输出防覆盖。
 - 不依赖硬件编码器的 CLI / 码流适配检查，以及显式硬件集成验证脚本。
@@ -229,7 +229,7 @@ python3 tests/filter_hardware.py --vtenc build/dev/vtenc
 
 GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理路径不锁定或复制 CPU 像素，无 CPU 滤镜回退。每帧等待 Metal 命令成功完成后提交硬编，保留原 PTS / duration，输出缓冲池最多 3 个。任务结果中的 `Metal GPU frames completed` 统计成功提交硬编的已完成 GPU 帧；无需滤镜且位深相同时为 0。
 
-当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持 tone mapping、物理旋转、Bicubic/Lanczos、字幕合成和运动自适应反交错。这些仍属于后续工作。
+当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持物理旋转、Bicubic/Lanczos、字幕合成和运动自适应反交错。这些仍属于后续工作。
 
 2026-11-17 已在本机完成 240 组 GPU 逐像素参考比对、`video_samples` 的 11 个成功转码用例和 6 个拒绝用例，以及 P2 回归；详见 [P3 验证记录](docs/P3验证.md)。结果不代表其他硬件、系统或任意尺寸已验证，也不承诺零拷贝或长期吞吐量。
 
@@ -261,13 +261,49 @@ GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理
 | `scene_ref` | `false`（默认，显示参考）或 `true`（场景参考） |
 | `sdr_source_peak` | 线性光 1.0 对应的亮度，默认 100 cd/m²，范围 `[0.01,10000]` |
 
-四组源/目标参数均支持 `auto`：源从解码帧附件优先、轨道元数据次之读取；目标继承已解析的源值。省略的参数等价于 `auto:auto`。显式源值覆盖解释，目标值用于实际像素变换和输出标签；所需元数据缺失或不支持时直接报错，不按尺寸猜测。与旧的 `--input-matrix` / `--output-matrix` / `--output-range` 互斥，避免顺序相关的覆盖。原始帧路径仍不接受本选项。
+四组源/目标参数均支持 `auto`：源从解码帧附件优先、轨道元数据次之读取；目标继承已解析的源值（`hdr2sdr` 的默认目标例外，见下节）。省略的参数等价于 `auto:auto`。显式源值覆盖解释，目标值用于实际像素变换和输出标签；所需元数据缺失或不支持时直接报错，不按尺寸猜测。与旧的 `--input-matrix` / `--output-matrix` / `--output-range` 互斥，避免顺序相关的覆盖。原始帧路径仍不接受本选项。
 
 转换在浮点 Metal 内核中依次执行：范围归一化 → YCbCr 转 R′G′B′ → 逆传递函数 → 线性 RGB 色域矩阵（需要时做 Bradford 白点适应）→ 目标传递函数 → 目标 YCbCr → 量化。仅矩阵/范围转换和身份转换跳过不必要的传递函数往返。非线性转换后才做垂直两点色度降采样，保持 left 相位；支持与裁剪、缩放、Bob 组合。
 
 与 NVEnc 一致，显示参考 BT.709 使用理想 BT.1886 gamma 2.4；`scene_ref=true` 切换为 BT.709 OETF。PQ 以 10000 cd/m² 归一化；HLG 显示参考采用 1000 cd/m²、gamma 1.2 的亮度相关 OOTF，场景参考采用逆/正 OETF 与 12 倍标度。HLG 在逆 OETF **之后**计算场景线性亮度并应用 OOTF，与参考版本对编码 RGB 先作亮度校正的顺序不同，保证正反变换互逆。PQ 输入负值及超过 1.0 的非法信号先限幅，避免有理式奇点；色域转换不做中间 RGB 限幅，传递函数按自身定义处理负值，最终输出超范围值裁切。
 
-当前没有移植 `hdr2sdr` tone mapping、LUT3D、`approx_gamma` LUT 近似、RGB 平面、YCgCo、BT.2020 constant-luminance 或其他未列出的曲线/基色；请求这些参数会报错。HDR 转 SDR 不会自动压缩高光；HDR 输出只写转换后的矩阵、传递函数、基色和范围，不复制失效的 mastering display / content light 元数据，也不生成新的 HDR10 静态元数据。Dolby Vision 始终拒绝。编码器必须确认输出色彩标记，否则任务失败。
+当前没有移植 LUT3D、`approx_gamma` LUT 近似、RGB 平面、YCgCo、BT.2020 constant-luminance 或其他未列出的曲线/基色；请求这些参数会报错。未启用 `hdr2sdr` 时，HDR 转 SDR 不会自动压缩高光；HDR 输出只写转换后的矩阵、传递函数、基色和范围，不复制失效的 mastering display / content light 元数据，也不生成新的 HDR10 静态元数据。Dolby Vision 始终拒绝。编码器必须确认输出色彩标记，否则任务失败。
+
+### HDR→SDR tone mapping
+
+```bash
+# 默认目标 BT.709；默认源峰值 1000 cd/m²、SDR 白点 100 cd/m²
+./build/dev/vtenc -i hdr10.mp4 -o sdr.mp4 --codec hevc --output-depth 10 \
+  --vpp-colorspace hdr2sdr=hable
+
+# PQ 或 HLG 都可接入；源色彩标记缺失时使用已有 FROM:TO 参数显式声明
+./build/dev/vtenc -i hlg.mp4 -o sdr-hlg.mp4 --avsw --input-chroma-loc left \
+  --vpp-colorspace hdr2sdr=bt2390,source_peak=1000,ldr_nits=100
+
+# Mobius 保留 transition 以下线性响应；降低去饱和强度保留更多 RGB 比例
+./build/dev/vtenc -i hdr10.mp4 -o sdr-mobius.mp4 \
+  --vpp-colorspace hdr2sdr=mobius,transition=0.3,peak=1,desat_strength=0.5
+
+./build/dev/vtenc -i hdr10.mp4 -o sdr-reinhard.mp4 \
+  --vpp-colorspace hdr2sdr=reinhard,contrast=0.5,peak=1,source_peak=4000,ldr_nits=203
+```
+
+`hdr2sdr=none|hable|mobius|reinhard|bt2390` 默认 `none`。启用时只接受 PQ/HLG 输入，要求 `scene_ref=false`；源矩阵、基色和传递函数仍从元数据读取或显式覆盖，不猜测为 HDR10。输出矩阵、传递函数和基色的 `auto` 改为 **BT.709**，范围仍继承源；可显式选择其他已支持 SDR 色彩空间，但不能输出 PQ/HLG。输出位深仍由 `--output-depth` 决定，默认 8-bit。
+
+处理顺序为逆传递函数 → **源色域的线性 RGB tone mapping 与高光去饱和** → 目标色域矩阵 → SDR 传递函数。与 NVEnc 一致，去饱和将保持 RGB 比例的亮度缩放结果与逐通道曲线结果混合；`desat_strength=0` 保持 RGB 比例。不做局部/逐帧自适应映射，也不读取 MaxCLL 自动猜测 `source_peak`。
+
+| 参数 | 默认值 | 校验范围 / 适用曲线 |
+| --- | --- | --- |
+| `source_peak` / `ldr_nits` | 1000 / 100 cd/m² | `1 <= ldr_nits <= source_peak <= 10000` |
+| `desat_base` / `desat_strength` / `desat_exp` | 0.18 / 0.75 / 1.5 | `[0,1]` / `[0,1]` / `[0.01,10]`，四种曲线通用 |
+| `a,b,c,d,e,f` | 0.22,0.3,0.1,0.2,0.01,0.3 | 仅 Hable；`a,e∈[0,10]`、`b,d,f∈[0.0001,10]`、`e<f`、`e/f<=c<=1`，曲线不能恒为零 |
+| `transition` | 0.3 | 仅 Mobius，`[0,0.999]` |
+| `peak` | 1 | Mobius / Reinhard，`[0.001,100]`；Mobius 另要求 `peak*source_peak/ldr_nits >= 1` |
+| `contrast` | 0.5 | 仅 Reinhard，`[0.001,0.999]` |
+
+参数须有限，重复参数、为错误曲线设置参数、未启用映射却设置调节参数均报错。HDR2SDR 统一以 `ldr_nits` 作为线性 RGB 的亮度标度；若同时显式设置 `sdr_source_peak`，必须与其相等。这避免参考实现两个独立亮度标度不一致时，声明峰值与曲线白点错位。
+
+四种曲线均按所选 NVEnc 版本移植：Hable 用声明峰值归一化有理曲线；Mobius 在 transition 处平滑连接；Reinhard 用 `(1-contrast)/contrast` 控制映射；BT.2390 在 PQ 域使用 Hermite 肩部曲线。**BT.2390 保留该 NVEnc 实现 PQ 辅助函数的 203 参考白倍率**，不宣称与其他软件的同名映射逐位一致。针对数值边界，Hable/Mobius 使用代数等价的稳定表达式，Mobius 有效峰值为 1 时为身份映射；BT.2390 将超声明源峰值的输入限制到峰值后再进肩部，避免多项式外推反转高光，源/目标峰值相等时为身份映射。最终量化仍会裁切目标色域外的值。
 
 显式验证（不运行全量测试）：
 
@@ -276,9 +312,10 @@ ctest --preset dev -R '^vtenc.cli$'
 ctest --preset dev -R '^vtenc.colorspace$'
 ./build/dev/vtenc_gpu_filter_test
 python3 tests/colorspace_hardware.py
+python3 tests/colorspace_hardware.py --tone-mapping
 ```
 
-2026-11-17 本机通过 780 个 GPU 像素用例和 6 个真实码流转换用例，见 [色彩空间验证记录](docs/色彩空间验证.md)。
+2026-11-17 本机通过 980 个 GPU 像素用例；基础色彩转换验证了 6 个真实码流，tone mapping 追加验证了 9 个映射输出和 1 个裁切对照，见 [色彩空间验证记录](docs/色彩空间验证.md)。
 
 ## P3 Bob 反交错
 
