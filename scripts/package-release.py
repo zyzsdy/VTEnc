@@ -167,7 +167,7 @@ def main():
     (stage / 'BUILD-MANIFEST.json').write_text(json.dumps(manifest, indent=2) + '\n')
     (stage / 'README.txt').write_text(
         f'VTEnc {version} / macOS arm64\n'
-        f'Mach-O deployment floor: macOS {minimum}; see the online P9 verification linked in README.md.\n'
+        f'Mach-O deployment floor: macOS {minimum}; feature availability depends on the system and hardware.\n'
         'Run bin/vtenc; retain the sibling lib directory. Homebrew is not needed at runtime.\n'
         f'Signing: {manifest["signing"]}. '
         + ('Not notarized; Gatekeeper may block downloaded files.\n' if not args.notary_profile else

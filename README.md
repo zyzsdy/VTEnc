@@ -1,104 +1,285 @@
 # VTEnc
 
-本项目受到 [NVEnc（rigaya/NVEnc）](https://github.com/rigaya/NVEnc) 的启发，并使用、移植了其中部分代码（色彩转换、IVTC、YADIF 与字幕工作流等）。相关版权、MIT 许可证及具体来源见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+VTEnc 是面向 Apple Silicon Mac 的命令行视频编码工具，使用 VideoToolbox 进行硬件编码，支持 H.264、HEVC，以及裁剪、缩放、反交错、色彩转换和字幕烧录等视频处理。适合日常转码、批量处理和脚本集成。
 
-面向 Apple Silicon M 系列的原生 VideoToolbox 硬件编码器，借鉴 NVEncC 的 CLI、能力探测和模块划分，使用 C++20 + 少量 Objective-C++。
+视频编码始终使用硬件。具体编码格式、位深和控制选项是否可用，取决于运行时的 macOS、硬件和任务配置。
 
-本仓库独立于 NegativeEncoder；未来通过命令行协议集成。功能范围以截至 M6 的硬件支持为目标，硬编能力以当前系统的真实探测为准。编码始终使用硬件；解码支持显式硬解、FFmpeg 软解，以及硬解失败后一次软解重试。
+项目受到 [NVEnc](https://github.com/rigaya/NVEnc) 的启发，并使用了其中部分代码。相关版权及许可证见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
-## 当前状态
+## 安装
 
-已实现 P1 硬编闭环、基于 avformat 的多格式输入转码，以及 P3 GPU 缩放、裁剪、基础色彩转换与 Bob 反交错。现有功能：
+### 使用发行包
 
-- CMake / Ninja 的 Debug、Release 构建与安装目标，以及 P9 独立依赖／ARM64 发行打包。
-- 纯 C++ CLI、参数校验，以及独立的 Apple 框架适配库。
-- H.264 8-bit、HEVC 8/10-bit 的硬件会话探测与支持属性枚举。
-- Objective-C++ / ARC 的 Metal 设备查询。
-- 合成测试帧 / 原始 NV12、P010 输入，H.264 High 8-bit、HEVC Main 8-bit / Main10 硬件编码。
-- ABR、原生 Quality / CBR / VBR，按实际码流检查的 ABR 上限 / VBR 缓冲约束，速度倾向预设、GOP 上限及定点关键帧；详见 P8。
-- 压缩输入统一交给 `libavformat` 自动探测，不设格式或扩展名白名单；支持实测 MKV、TS、WebM、MP4/MOV 等，探测失败直接报错。原生 VideoToolbox 硬解或 `libavcodec` 软解，原生硬编，avformat 根据输出文件名选择封装器，或由 `-f` / `--output-format` 显式指定；默认复制第一条音轨。
-- 文件转码将源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换传入封装器，精度与元数据保存取决于目标格式；支持 `hev1` 描述适配。
-- 外部 ASS/SSA 字幕：libass 排版／字形掩码、Metal 线性光合成与缓存、中文字体、偏移／透明度／裁剪／多层、SDR 8/10-bit 与 PQ/HLG。独立颜色标签及 HDR10 静态元数据策略见 P6。
-- Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709/BT.2020 NCL/SMPTE 240M 矩阵转换，以及 `--vpp-colorspace` 线性光色域、传递函数转换，以及 Hable / Mobius / Reinhard / BT.2390 HDR→SDR tone mapping。
-- Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010、硬解或软解的文件输入。两个原始交错样片在本机无法硬解，可用软解接入 Metal Bob。
-- P7 Metal YADIF 运动自适应反交错：单倍／场倍、TFF/BFF、逐行混合、RFF 与 HEVC 单场配对，保留精确时间轴；与 Bob、IVTC 互斥。
-- P4 `--json-status` 版本化 JSON Lines 能力、进度与终态协议，或普通终端实时进度；编码日志统一 stderr，stdout 可独占码流。
-- avformat 自动识别 Y4M 文件/stdin；显式 `--avsw` 接收 planar 4:2:0 8/10-bit，严格校验颜色解释、帧率、截断和 EOF。
-- P5 显式 CFR／forcecfr、旋转后 DAR 标签覆盖，以及原生 AudioToolbox AAC-LC 转码；采样率、声道和封装边界见下文。
-- 有界回调和重排队列、背压和排空；SIGINT 取消、失败清理、输出防覆盖。
-- 不依赖硬件编码器的 CLI / 码流适配检查，以及显式硬件集成验证脚本。
-
-P4 用法、JSON 字段、Y4M 颜色解释及生产者退出状态约定见 [P4 调用协议](docs/P4调用协议.md)，测试记录见 [P4 验证](docs/P4验证.md)。
-
-完整开发方案见 [docs/开发方案.md](docs/开发方案.md)。
-
-## 环境准备
-
-需要原生 arm64 macOS、支持 C++20 的 Apple Clang、macOS SDK、CMake 3.25+、Ninja 和 FFmpeg 7.0+ 开发库（`libavformat`、`libavcodec`、`libavutil`、`libswresample`）。最低部署版本暂定 macOS 13；这不代表所有目标功能在 macOS 13 上均可用，新 API 必须检查系统版本与会话能力。
+从 [Releases](https://github.com/zyzsdy/VTEnc/releases) 下载 `vtenc-<版本>-macos-arm64.zip` 并解压。发行包适用于原生 Apple Silicon macOS 环境，运行系统要求及签名信息见包内说明。
 
 ```bash
-xcode-select --install  # 尚未安装 Xcode Command Line Tools 时执行
+# 将版本号替换为下载文件对应的版本
+vtenc_version='替换为实际版本号'
+unzip "vtenc-${vtenc_version}-macos-arm64.zip"
+"./vtenc-${vtenc_version}-macos-arm64/bin/vtenc" --version
+
+# 将程序加入当前终端的 PATH
+export PATH="$PWD/vtenc-${vtenc_version}-macos-arm64/bin:$PATH"
+vtenc --help
+```
+
+保持解压后的 `bin/` 和 `lib/` 相对位置不变，不要只复制 `vtenc` 可执行文件。发行包包含所需的第三方动态库，运行时无需另外安装 Homebrew、FFmpeg 命令行程序或 Python。若要在新终端中直接使用 `vtenc`，将安装目录的绝对 `bin/` 路径加入 shell 配置中的 `PATH`。
+
+可用以下命令计算下载文件的 SHA-256，并与同版本的 `SHA256SUMS.txt` 中对应条目核对：
+
+```bash
+shasum -a 256 "vtenc-${vtenc_version}-macos-arm64.zip"
+```
+
+未经 Apple 公证的发行包可能受到 Gatekeeper 限制；请查看包内的签名和公证说明。
+
+### 从源码安装
+
+先按下文建立开发环境，再从仓库根目录执行：
+
+```bash
+cmake --preset release
+cmake --build --preset release --parallel
+cmake --install build/release --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+vtenc --version
+```
+
+这种安装方式依赖本机的 FFmpeg、libass、FreeType 等动态库，需要保留对应依赖。用于分发到其他 Mac 时，请使用本文的发行打包流程。
+
+## 使用方法
+
+### 查看帮助与设备信息
+
+```bash
+vtenc --help
+vtenc --help vpp
+vtenc --help vpp-yadif
+vtenc --help bitrate
+vtenc --version
+vtenc --check-device
+vtenc --check-features --codec hevc --output-depth 10
+```
+
+`--help` 首先打印版本和编译信息，然后展示基本用法、示例及各参数的独立说明。`--help 关键词`（也可写作 `-h 关键词`）按参数名做区分大小写的子串匹配，并打印所有匹配参数的完整段落。关键词无需带前面的 `--`。
+
+`--check-features` 检查指定配置的硬件会话及公开控制选项，不编码帧；查询成功不代表所有分辨率、码率组合或素材都可用。
+
+### 基本转码
+
+命令框架为 `vtenc -i 输入文件 -o 输出文件 [选项]`。默认使用 H.264 8-bit、5000 kbit/s 平均码率，并复制第一条音轨（如果存在）。
+
+```bash
+# H.264 输出
+vtenc -i input.mkv -o output.mp4 --bitrate 5000
+
+# HEVC 10-bit 输出；10-bit 本身不代表 HDR
+vtenc -i input.mkv -o output-hevc.mp4 \
+  --codec hevc --output-depth 10 --bitrate 5000
+
+# 显式使用软件解码，视频编码仍使用硬件
+vtenc --avsw -i input.mkv -o output-software-decode.mp4
+
+# 转换第一条音轨为 AAC
+vtenc -i input.mkv -o output-aac.mp4 \
+  --audio-codec aac --audio-bitrate 192
+```
+
+输入格式自动探测，不按文件扩展名筛选。输出封装格式由目标文件名选择，也可用 `-f` / `--output-format` 显式指定；无法探测或流与封装器不兼容时会报错。已有输出文件不会被覆盖。
+
+默认先尝试硬件解码，遇到解码失败时输出诊断，并在输入可重新读取的情况下从头软解重试一次。`--avhw` 强制硬解，失败即退出；`--avsw` 直接使用软解。编码、滤镜和输出错误不会触发软解重试。
+
+### 常用视频处理
+
+```bash
+# 裁剪四边各 8 像素，并缩放到 1280×720
+vtenc -i input.mp4 -o resized.mp4 \
+  --crop 8,8,8,8 --output-res 1280x720
+
+# YADIF 场倍反交错
+vtenc -i interlaced.mp4 -o progressive.mp4 --vpp-yadif mode=bob
+
+# 还原 3:2 telecine 素材，明确指定上场优先
+vtenc -i telecine.mp4 -o film.mp4 --vpp-ivtc --field-order tff
+
+# 烧录外部 ASS 字幕
+vtenc -i input.mp4 -o subtitled.mp4 \
+  --vpp-subburn filename=subtitles.ass
+
+# 转为 30000/1001 fps 的固定帧率
+vtenc -i input.mp4 -o cfr.mp4 --avsync cfr --fps 30000/1001
+```
+
+裁剪边距和输出尺寸须满足所选滤镜的要求。YADIF、Bob 和 IVTC 互斥；自动场序需要明确的输入元数据，缺失时应根据素材指定场序。色彩转换、HDR→SDR 和字幕高级参数可分别通过 `--help vpp-colorspace`、`--help vpp-subburn` 查看。
+
+### 码率与质量控制
+
+`--bitrate`、`--quality`、`--cbr` 和 `--vbr` 四选一。码率单位为十进制 kbit/s；`--quality 0..1` 是 VideoToolbox 原生质量参数，不等同于 CRF 或 CQP。原生 VBR 要求 macOS 26+，各控制项仍需硬件会话支持。
+
+```bash
+# 平均码率目标与两秒窗口上限
+vtenc -i input.mp4 -o capped.mp4 \
+  --bitrate 5000 --max-bitrate 8000 --bitrate-window 2
+
+# 原生 CBR；文件转码时必须显式指定固定帧率
+vtenc -i input.mp4 -o cbr.mp4 \
+  --avsync cfr --fps 30000/1001 --cbr 5000
+
+# 原生质量控制
+vtenc -i input.mp4 -o quality.mp4 --codec hevc --quality 0.7
+```
+
+### 管道与脚本
+
+```bash
+# 输出 MPEG-TS 到 stdout，日志写入单独文件
+vtenc -i input.mp4 -o - -f mpegts > output.ts 2> encode.log
+
+# 将进度、诊断和任务结果写成 JSON Lines
+vtenc -i input.mp4 -o output-json.mp4 --json-status 2> status.jsonl
+```
+
+`-o -` 必须显式指定封装格式，且该封装器需要支持不可寻址的输出。stdout 只写媒体数据，任务日志、诊断和进度均写入 stderr。stdout 开始输出后不再从头重试；脚本应检查退出码，因为已输出的字节无法撤回。
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 成功 |
+| `1` | 运行时或硬件错误 |
+| `2` | 参数错误 |
+| `130` | 用户取消 |
+
+## 功能简介
+
+| 功能 | 说明 |
+| --- | --- |
+| 硬件编码 | H.264 8-bit、HEVC 8/10-bit；硬件不可用时明确报错 |
+| 解码选择 | 自动硬解与一次软解重试，也可强制硬解或软解 |
+| 输入与封装 | 自动探测媒体输入，按文件名或显式格式选择输出；支持原始 NV12/P010、合成帧及 Y4M 文件或 stdin |
+| 编码控制 | 平均码率、原生 Quality / CBR / VBR、码率上限、VBR 缓冲容量、速度倾向预设、GOP 上限及指定关键帧 |
+| 几何处理 | 裁剪、缩放和显示宽高比设置 |
+| 反交错与电影还原 | Bob、YADIF、IVTC，支持显式场序和混合素材处理 |
+| 色彩与 HDR | 位深、范围、矩阵、传递函数与色域转换；Hable、Mobius、Reinhard、BT.2390 HDR→SDR；颜色标签与 HDR10 静态元数据控制 |
+| 字幕 | 外部 UTF-8 ASS/SSA 烧录，支持字体选择、偏移、透明度、裁剪和多层字幕 |
+| 时间轴 | 保留源可变帧率，或显式转换为 CFR / forcecfr |
+| 音频 | 默认复制第一条音轨，也可移除音频或转为 AAC-LC；AAC 支持单声道／双声道 |
+| 自动化 | 参数关键词帮助、JSON Lines 状态输出、stdout 媒体输出及明确退出码 |
+
+具体组合以参数帮助和运行时检查为准。Dolby Vision 输入不受支持。原始 NV12/P010 输入需要显式指定尺寸和帧数，帧率默认 30 fps，可用 `--fps` 设置；Y4M 或其他缺少必要色彩信息的输入需要补充颜色解释。AAC 转码要求文件输出，stdout 可使用音频复制或无音频模式。
+
+## 开发环境建立
+
+在原生 arm64 macOS 终端中准备以下工具，不使用 Rosetta：
+
+- Xcode Command Line Tools 或 Xcode，提供支持 C++20 的 Apple Clang 和 macOS SDK。
+- CMake 3.25+、Ninja。
+- FFmpeg 开发库（`libavformat`、`libavcodec`、`libavutil`、`libswresample`）、libass、FreeType。
+- 发行打包另需 Python 3.9+、Meson、pkg-config，以及下载依赖源码的网络连接。
+
+使用 Homebrew 安装开发依赖并获取源码：
+
+```bash
+# 尚未安装 Apple 命令行工具时执行
+xcode-select --install
+
 brew install cmake ninja ffmpeg libass freetype
 git clone https://github.com/zyzsdy/VTEnc.git
 cd VTEnc
 ./scripts/bootstrap.sh
 ```
 
-`bootstrap.sh` 检查平台与工具并构建 Debug，不修改系统配置、不安装依赖、不自动运行测试。SDK 由 `xcode-select` / `xcrun` 选择，不在仓库中硬编码 SDK 路径。自定义 FFmpeg 安装可通过 `cmake --preset dev -DCMAKE_PREFIX_PATH=/your/ffmpeg/prefix` 指定。FFmpeg 的头文件和动态库必须来自同一安装；运行时需要保留这些动态库。实际可运行的最低 macOS 版本同时受 FFmpeg 库及其依赖的部署目标约束，本机 Homebrew FFmpeg 9.0.2、libass 0.17.5 和 FreeType 2.15.0 使用 macOS 27.0 部署目标，不能据此声称产物兼容 macOS 13。当前无需完整 Xcode；Metal Shader 源码嵌入可执行文件，运行时编译，失败直接报错。
+`bootstrap.sh` 检查平台和工具后构建 Debug，不安装依赖，也不自动运行测试。SDK 使用系统选定的开发工具路径。
 
-也可以将构建工具安装到项目内隔离环境（本次环境初始化采用此方式）：
+也可将 CMake 和 Ninja 安装到项目内的 Python 虚拟环境；FFmpeg、libass、FreeType 仍需单独安装：
 
 ```bash
 python3 -m venv build/tools
-build/tools/bin/python -m pip install 'cmake==3.31.6' 'ninja==1.11.1.4'
 source build/tools/bin/activate
+python -m pip install 'cmake>=3.25' ninja
 ./scripts/bootstrap.sh
 ```
 
-后续终端使用该环境前执行 `source build/tools/bin/activate`。Python 用于安装开发工具及准备测试素材，`vtenc` 本身没有 Python 运行时依赖；`build/` 整体不纳入 Git。
+如使用自定义依赖安装目录，配置时指定前缀：
 
-2026-11-16 已在 Apple M6、macOS 27.2.1、Apple Clang 21 / macOS SDK 27.2 上验证 Debug / Release 构建、本地安装和 CLI 检查；H.264 8-bit、HEVC 8-bit / 10-bit 的 1920×1080 硬件会话均成功准备并确认硬件后端。这不是码流质量验证，也不代表其他机型或旧系统已完成验证。
+```bash
+cmake --preset dev -DCMAKE_PREFIX_PATH=/path/to/dependencies
+```
 
-## 编译二进制与分发包
+头文件和动态库应来自同一依赖安装。预设的 macOS 部署目标为 13.0，但本机构建的实际运行系统要求还取决于所链接依赖及使用的功能。
 
-### 本机 Release 二进制
+## 开发构建和运行
 
-在 Apple Silicon Mac 上准备上述依赖后，从仓库根目录执行：
+所有命令从仓库根目录执行，构建产物位于 `build/`。
+
+### Debug
+
+```bash
+cmake --preset dev
+cmake --build --preset dev --parallel
+./build/dev/vtenc --version
+./build/dev/vtenc --help
+./build/dev/vtenc --help vpp
+```
+
+使用真实素材运行转码：
+
+```bash
+./build/dev/vtenc -i input.mp4 -o build/output.mp4 --codec hevc
+```
+
+也可用合成帧生成一个短视频；此命令会实际使用硬件编码器：
+
+```bash
+./build/dev/vtenc --synthetic --input-res 1920x1080 --frames 120 \
+  --fps 30 --codec h264 -o build/demo.mp4
+```
+
+按需执行 CLI 检查：
+
+```bash
+ctest --preset dev -R '^vtenc.cli$'
+```
+
+### Release 与本地安装
 
 ```bash
 cmake --preset release
 cmake --build --preset release --parallel
 ./build/release/vtenc --version
 cmake --install build/release --prefix "$PWD/build/install"
+./build/install/bin/vtenc --help
 ```
 
-可执行文件为 `build/release/vtenc`，安装后为 `build/install/bin/vtenc`。这是动态链接本机依赖的构建，单独复制该文件到另一台 Mac 不保证能运行。Debug 构建使用 `dev` preset；构建不会自动运行测试。
+`dev` 为 Debug 构建，`release` 为 Release 构建；两者都使用本机依赖。`distribution` 用于下述包含依赖的发行包。
 
-### 可迁移的 macOS ARM64 发行包
+## 打包
 
-发行构建使用独立依赖前缀，与本机 Homebrew FFmpeg 隔离。需要 Python 3.9+、CMake、Ninja、Meson、pkg-config、Apple Command Line Tools，以及首次下载源码时的网络连接：
+### 生成 macOS ARM64 发行包
+
+在 Apple Silicon Mac 上安装打包工具，然后从仓库根目录执行：
 
 ```bash
-brew install cmake ninja meson pkgconf
+brew install cmake ninja meson pkgconf python
 python3 scripts/build-dependencies.py
 cmake --preset distribution
 cmake --build --preset distribution --parallel
 python3 scripts/package-release.py
 ```
 
-依赖版本、来源与 SHA-256 固定在 `scripts/dependencies.json`，源码、编译日志和命令记录都位于 `build/distribution/`。FFmpeg 使用共享库，禁用 GPL、nonfree、version3 组件、所有编码器和外部依赖自动发现；保留 libavformat 探测／封装、libavcodec 解码与 libswresample。视频编码仍只通过系统 VideoToolbox，AAC 编码仍只通过 AudioToolbox。字幕依赖从源码构建，使用 CoreText 系统字体发现，不捆绑字体、Homebrew、FFmpeg CLI 或 Python 运行时。新版 macOS HVF 字体通过 FreeType 的运行时检查和系统 `libhvf` 弱链接支持。
+依赖构建使用固定版本及校验值，安装到 `build/distribution/prefix/`。发行包包含所需第三方动态库，不依赖接收方的 Homebrew 安装。
 
-`build/packages/` 生成：
+`build/packages/` 中生成以下文件：
 
-- `vtenc-<版本>-macos-arm64.zip`：`bin/vtenc`、`lib/` 动态库、README、许可证与 `BUILD-MANIFEST.json`，不包含仓库的 `docs/` 目录；包内 README 的相关链接指向 GitHub。
-- `vtenc-<版本>-dependency-sources.tar.gz`：该版本对应的未修改依赖源码、构建脚本和命令记录。
-- `vtenc-<版本>-SHA256SUMS.txt`：下载校验值。
+| 文件 | 内容 |
+| --- | --- |
+| `vtenc-<版本>-macos-arm64.zip` | 程序、动态库、使用说明、许可证和构建清单 |
+| `vtenc-<版本>-dependency-sources.tar.gz` | 对应的第三方依赖源码及构建材料 |
+| `vtenc-<版本>-SHA256SUMS.txt` | 发行文件的 SHA-256 校验清单 |
 
-解压后执行 `./vtenc-<版本>-macos-arm64/bin/vtenc --help`；必须保留旁边的 `lib/` 目录。可将 `bin/` 加入 PATH，不要只移动 `vtenc`。可用 `shasum -a 256 -c vtenc-<版本>-SHA256SUMS.txt` 校验下载。打包脚本拒绝引用发行依赖目录以外的非系统库，检查所有 Mach-O 为 arm64，并记录每个文件的最低部署版本。依赖构建目标为 macOS 13.0；实际测试的系统与尚未完成的旧系统验收见 [P9 验证](docs/P9验证.md)，不能将加载命令检查当作旧系统实机验证。
+分发时应一起提供二进制包、对应依赖源码包和校验清单，并保留第三方许可证及声明。打包脚本拒绝覆盖已有的同版本目录；重新打包前请先移走 `build/packages/` 中该版本的旧目录。
 
 ### 签名与公证
 
-默认发行包使用 **ad-hoc 签名，未经过 Apple 公证**；下载后的 Gatekeeper 检查可能阻止运行。ad-hoc 仅用于本地代码完整性，不提供开发者身份认证。申请 [Developer ID Application 证书](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/) 并安装到本机钥匙串后，可在打包阶段传入身份；如已有 `notarytool` 钥匙串配置，可同时提交公证：
+默认打包使用 ad-hoc 签名，不包含 Apple 公证。如需 Developer ID 签名及公证，先准备有效的 Developer ID Application 证书和已配置的 `notarytool` 钥匙串配置，再执行：
 
 ```bash
 security find-identity -v -p codesigning
@@ -107,545 +288,4 @@ python3 scripts/package-release.py \
   --notary-profile VTEnc-notary
 ```
 
-此入口对每个动态库和可执行文件开启 hardened runtime 与安全时间戳，并等待 Apple 返回 `Accepted`；失败直接退出。ZIP 中的 CLI 不支持直接装订 ticket，公证结果单独记录，下载运行仍需系统联网核验；此流程需持有有效证书后另行验证。不要将私钥或公证凭据提交到仓库。打包脚本拒绝覆盖同版本已有目录，重新打包前请先将旧目录移走。
-
-本软件使用 LGPL-2.1-or-later 的 FFmpeg；精确对应源码随每个 [Release](https://github.com/zyzsdy/VTEnc/releases) 的 dependency-sources 资产提供。第三方许可证、FreeType 声明与替换 LGPL 动态库的说明随包附带，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-## 构建与运行
-
-```bash
-cmake --preset dev
-cmake --build --preset dev
-./build/dev/vtenc --help
-./build/dev/vtenc --version
-./build/dev/vtenc --check-device
-./build/dev/vtenc --check-features --codec h264
-./build/dev/vtenc --check-features --codec hevc --output-depth 10
-
-# 只运行与 CLI 有关的检查
-ctest --preset dev -R '^vtenc.cli$'
-
-# 发布构建与本地安装
-cmake --preset release
-cmake --build --preset release
-cmake --install build/release --prefix "$PWD/build/install"
-```
-
-能力探测固定使用 1920×1080 的 NV12 / P010 输入约束，设置对应 Profile，准备会话并核验 `UsingHardwareAcceleratedVideoEncoder`。它不提交帧，不验证真实码流，不代表最大分辨率、吞吐量或属性值组合均可用。硬件忙、配置不受支持等错误直接报告 OSStatus 并以非零状态退出，不降级到软件编码。
-
-退出码：`0` 成功、`1` 运行时或硬件错误、`2` 参数错误、`130` 用户取消。所有编码任务的实时进度、结果、日志和诊断均写 stderr。使用 `-o -` 时 stdout 只含媒体码流；文件输出时 stdout 为空。`--json-status` 将能力查询、进度、诊断和终态写成逐行 JSON，供上层软件结构化读取。
-
-## P1 硬件编码
-
-```bash
-# 合成 65 帧 1080p、30000/1001 fps 的 H.264 码流
-./build/dev/vtenc --synthetic --input-res 1920x1080 --frames 65 \
-  --fps 30000/1001 --codec h264 --bitrate 5000 --gop-len 60 -o build/demo.h264
-
-# 原始 P010：HEVC Main10，Quality 是 VideoToolbox 原生 0..1 质量目标
-./build/dev/vtenc -i input.p010 --input-res 1920x1080 --frames 120 \
-  --fps 24000/1001 --codec hevc --output-depth 10 --quality 0.7 -o build/demo.hevc
-
-# 无硬件码流适配检查
-ctest --preset dev -R '^vtenc.bitstream$'
-
-# 显式硬件集成验证：需要真实 Apple Silicon、ffprobe、ffmpeg、Python 3
-python3 tests/encode_hardware.py --vtenc build/dev/vtenc
-```
-
-输入尺寸和帧数必须显式提供。`-i` 只接受普通原始文件：8-bit 是紧密排列的 NV12（Y 后接交错 UV），10-bit 是小端 P010（每个 16-bit 字的高 10 位有效，低 6 位为零）；文件中没有行填充。`--output-depth` 同时决定原始输入格式，不做位深转换。只读 `--frames` 指定的帧数，尾部数据不消费，输入不足则报错。合成输入为移动灰阶渐变。
-
-本阶段限定逐行、video range、BT.709 SDR；调用方负责提供符合约定的原始数据。10-bit 不等于 HDR；本阶段不读取或转换输入色彩元数据。帧率是整数或整数分数，PTS 从 0 开始，以 `帧号 × fps_den / fps_num` 构造，不做浮点累积。固定禁用编码帧重排；原始帧输入使用固定帧率，不携带音频，可输出裸码流或 avformat 容器。
-
-默认平均码率目标为 5000 kbit/s。`--bitrate` 绑定 `AverageBitRate`，是软目标，不保证输出大小；`--quality` 绑定原生 `Quality`，不等价于 CRF/CQP，两者不能同时指定。`--gop-len` 是最大关键帧间隔，编码器可以提前插入关键帧。所有属性设置检查 OSStatus，不支持就失败，不做软件回退。
-
-输出格式由文件名或 `-f` / `--output-format` 决定，例如 `.mkv`、`.ts`、`.mp4`，与压缩输入转码使用相同的封装器选择规则。选择与编码器匹配的 H.264 / HEVC 裸码流文件时，保留 Annex B 和时间戳 CSV 输出（`-o -` 只有码流，不生成 CSV）：同步帧前写入 SPS/PPS（HEVC 还包括 VPS），将长度前缀 NAL 转为起始码。裸码流不携带容器级 PTS/DTS，播放器或 FFprobe 猜测的帧率可能不正确；封装时需指定本次输入帧率。`<输出路径>.timestamps.csv` 保存编码回调原始整数 PTS/DTS/duration、同步帧标记及该帧的字节范围；VideoToolbox 未指定的 DTS 保持为空，范围包括该帧前的参数集。
-
-同目录临时文件在全部排空、帧数与时间戳校验、硬件后端复核后发布；已有输出或时间戳文件均不覆盖。每批最多 8 帧，回调只保留样本或记录错误，调度线程负责码流写出。SIGINT 停止新提交、排空已提交帧、删除临时输出并返回 130。运行错误返回 1 并清理临时输出；进程被强制杀死或系统崩溃时可能残留 `.part.*` 文件。两个文件分别原子发布，不承诺跨文件的崩溃事务。
-
-2026-11-16 在 Apple M6 / macOS 27.2.1 上完成三种格式的真实硬编及独立码流验证，覆盖合成输入、非对齐宽度原始输入、尾批排空及异常路径。详见 [P1 验证记录](docs/P1验证.md)。该结果不代表其他硬件、旧 macOS、任意分辨率或 HDR 已验证。
-
-## P8：编码控制与 NVEnc 风格参数
-
-本轮实现和实测范围见 [P8 验证](docs/P8验证.md)。参数名称与单位参考 NVEnc；不复制 NVIDIA 的算法、P1～P7 档位或 CQP 标度。实际支持取决于当前会话，属性设置、准备、回读或输出检查失败都会终止任务。
-
-| 参数 | VideoToolbox 语义与限制 |
-| --- | --- |
-| `--bitrate KBIT/S` | ABR 软目标 `AverageBitRate`；默认 5000 |
-| `--quality 0..1` | 原生 `Quality`，不等价于 CRF/CQP |
-| `--cbr KBIT/S` | 原生 `ConstantBitRate`，包括低复杂度画面的填充；不是每帧等大或任意窗口恒定。avformat 输入须显式 `--avsync cfr/forcecfr --fps NUM[/DEN]` |
-| `--vbr KBIT/S` | 原生 `VariableBitRate`，须 macOS 26+ 和对应 SDK / 会话支持；不接受 0 或 `--vbr-quality` |
-| `--max-bitrate KBIT/S` | ABR 模式设置 `DataRateLimits`；VBR 模式设置公开的 `VBVMaxBitRate`，两者不会混用。须不低于目标码率，Quality/CBR 不接受 |
-| `--bitrate-window SECONDS` | ABR 上限的滑动窗口，默认 1 秒，范围 `(0,60]`；须同时指定 `--max-bitrate` |
-| `--vbv-bufsize KBIT` | VBR 缓冲容量，须 `--vbr` 和显式 `--max-bitrate`；`VBVBufferDuration = 容量 kbit / 最大码率 kbit/s`，不超过 60 秒。省略时显式设置 2.5 秒 |
-| `-u, --preset default\|performance\|quality` | `default` 不覆盖原生速度倾向，另两项只设置 `PrioritizeEncodingSpeedOverQuality=true/false`，`RealTime` 始终 false。不是原生预设字典透传，不承诺性能或画质排序 |
-| `--gop-len COUNT` | 最大关键帧间隔；允许编码器额外插入关键帧 |
-| `--keyfile FILE` | 每行一个从 0 开始的输出帧号，作用于场处理、CFR 和滤镜后的编码输入；严格递增、最多 100 万项，支持空行和 CRLF。每个请求须得到同步样本，超出实际 EOF 报错 |
-
-`--bitrate`、`--quality`、`--cbr`、`--vbr` 四选一。所有码率单位使用十进制 kbit/s，缓冲容量使用十进制 kbit。特别注意 NVEnc 英文选项文档曾将缓冲单位写成 kbps，其帮助和实现实际使用 kbit；这里按容量实现，不将同名参数解释为秒。
-
-```bash
-# 原生 CBR，显式 CFR 输出
-build/dev/vtenc -i input.mp4 -o build/cbr.mp4 --codec hevc \
-  --avsync cfr --fps 30000/1001 --cbr 5000 --preset quality
-
-# 原生 VBR + 最大输入速率 8 Mbit/s、容量 16 Mbit 的缓冲模型
-build/dev/vtenc -i input.mp4 -o build/vbr.mp4 --codec hevc \
-  --vbr 5000 --max-bitrate 8000 --vbv-bufsize 16000 --preset performance
-
-# ABR + 两秒滑动窗口（允许窗口内出现较高的单帧码率）
-build/dev/vtenc -i input.mp4 -o build/capped.mp4 \
-  --bitrate 5000 --max-bitrate 8000 --bitrate-window 2 --keyfile keyframes.txt
-```
-
-硬件接受属性不等于码流服从约束。本机高熵突变及密集关键帧样本中，`DataRateLimits` / VBV 会超限。VTEnc 在写入前逐包检查 ABR 的半开滑动窗口、或 VBR 的有理数泄漏桶包络；超限报告 PTS 和预算并返回非零，不降码率、不换后端、不从头软解重试。检查对象是 VideoToolbox 压缩样本，**不含容器开销、输出适配补入的参数集或音频**。VBR 包络检查不是完整 HRD / CPB 码流认证。文件模式撤销未完成文件；stdout 已发出的字节无法撤回，调用方必须检查退出码。`--keyfile` 请求过密同样可能使限码率任务失败。
-
-CBR 是原生算法请求，在静态段会填充，场景切换及极端纹理仍可能偏离目标；不要把它当作硬滑窗限速。`ExpectedFrameRate` 只是一项提示，本机对 30000/1001 回读为 29；日志记录请求值与有效值，真正提交的 PTS/duration 仍是整数有理数，未截成 29 fps。
-
-`--check-features [--codec ...] [--output-depth ...] --json-status` 在固定 1920×1080 / 30 fps 配置下为公开控制组合分别创建新会话，报告枚举、设置、准备、硬件和回读阶段；**不编码帧，也不保证任意素材或组合可用**。运行编码时 `encoder_settings` 记录原生属性请求及回读值，完整任务配置位于 `start/session.config`。能力协议详见 [P4 调用协议](docs/P4调用协议.md)。
-
-不开放 `--strict-gop`、`--bframes`、`--lookahead`、`--ref`、Open GOP / Profile / Level 覆盖和 P1～P7 预设。严格 GOP 无公开接口；当前输出调度仍禁用帧重排，固定 H.264 High / HEVC Main / Main10 AutoLevel。其他高级控制没有本轮明确需求，不将属性枚举结果当作已实现或已验证能力。原生预设字典只供诊断。
-
-## 压缩输入转码与输出格式
-
-```bash
-# H.264 输出，默认复制第一条音轨（也可以显式写 --audio-copy）
-./build/dev/vtenc -i input.mp4 -o build/output.mov --codec h264 --bitrate 5000
-
-# 10-bit 输入保持位深，输出 HEVC Main10
-./build/dev/vtenc -i input10.mov -o build/output10.mp4 --codec hevc --output-depth 10
-
-# video_samples 中的 VFR / AAC 完整转码
-./build/dev/vtenc -i tests/video_samples/timing/vfr_h264_aac.mp4 \
-  -o build/vfr.hevc.mp4 --codec hevc --audio-copy
-
-# 该旧样片 AAC 有重复 PTS，明确关闭音频可转码其完整视频轨
-./build/dev/vtenc -i tests/video_samples/decode/h264_8bit.mp4 \
-  -o build/bear.mp4 --no-audio
-
-# 相关规则与显式硬件集成检查
-ctest --preset dev -R '^vtenc.timeline$'
-python3 tests/transcode_hardware.py --vtenc build/dev/vtenc
-```
-
-不提供 `--input-res` 的文件输入全部走 avformat：不检查支持格式列表，也不依赖扩展名。MKV、TS、WebM、未知扩展名、无扩展名或错误扩展名均直接尝试解封装；失败保留 FFmpeg 的操作名、错误文本和错误码。输出不限制扩展名或格式列表：省略 `-f` 时由 avformat 根据输出文件名选择封装器；指定 `-f FORMAT` 或 `--output-format FORMAT` 时优先使用该 FFmpeg 封装器名称。无法推断格式、未知封装器或不兼容的流直接报错，不触发软解回退。文件模式读取源尺寸和时间轴，拒绝 `--frames`；仅显式 `--avsync cfr|forcecfr` 时接受目标 `--fps`。`--input-res` 明确选择 P1 紧密排列原始帧模式，此时还需 `--frames`，且不能指定 `--avhw` / `--avsw`。
-
-输出示例（编码器始终为 VideoToolbox 硬件编码器）：
-
-```bash
-./build/dev/vtenc --avhw -i input.mkv -o build/output.ts
-./build/dev/vtenc --avsw -i input.ts -o build/output.mkv
-./build/dev/vtenc -i input.anything -o build/output.data -f matroska
-./build/dev/vtenc -i input.mkv -o build/extensionless --output-format mpegts
-# 裸视频封装器不接受音轨，需要明确省略音频
-./build/dev/vtenc -i input.mkv -o build/output.h264 --no-audio
-```
-
-`-f` 与 `--output-format` 是同一选项，重复指定报错。格式名称由链接的 FFmpeg 提供，不在 CLI 中维护名单，也不会改变 `--codec` 的选择。本地文件输出保持单文件事务：完成后原子发布，不覆盖已有文件，失败或取消清理临时文件。不支持自行管理 IO / 多文件的封装器（如 HLS、segment）。
-
-`-o -`（或 `--output -`）直接流式写入标准输出，必须显式提供 `-f` / `--output-format`，缺少格式在打开输入和硬件会话之前返回参数错误。压缩输入、原始帧和合成输入均适用；不创建名为 `-` 的文件、临时输出或时间戳 CSV，所有任务日志和诊断写入 stderr。
-
-```bash
-# 媒体流与日志分别重定向
-./build/dev/vtenc --avhw -i input.mkv -o - -f mpegts > output.ts 2> vtenc.log
-# 直接通过管道交给后续程序
-./build/dev/vtenc --avsw -i input.ts -o - --output-format matroska | ffplay -i -
-# 原始裸码流也可输出到管道
-./build/dev/vtenc --synthetic --input-res 320x180 --frames 60 -o - -f h264 > output.h264
-```
-
-stdout 始终按不可 seek 的流交给 avformat。所选封装器必须能写入这种流；例如 MPEG-TS、Matroska、H.264/HEVC 裸码流可用，默认 MP4/MOV 需要 seek 回写，会明确报错；当前不自动启用 fragmented MP4。编码始终为硬件，不因目标封装改变编码器。
-
-标准输出已经发送的字节无法撤回。默认解码模式只允许在开始 stdout 封装之前、且输入可从头读取时软解重试一次；开始封装后的硬解错误直接退出，避免拼接两次转码的码流。若需要确保使用软解，应预先指定 `--avsw`。取消和失败可能留下部分码流；下游必须检查退出码。下游提前关闭管道会报告 Broken pipe 并返回 1，SIGINT 返回 130，诊断不会声称标准输出已被删除。
-
-显式运行输出封装回归（不注册为默认 CTest）：
-
-```bash
-python3 tests/output_formats_hardware.py --vtenc build/dev/vtenc
-python3 tests/stdout_hardware.py --vtenc build/dev/vtenc
-```
-
-压缩输入 `-i -` 交给 avformat 读取标准输入。不可 seek 的管道 / 实时输入无法从头重试：默认模式若硬解失败，会明确报错并提示预先选择 `--avsw`，不会从已消耗数据的中间位置伪造一次成功重试。
-
-解码模式（适用于所有压缩输入，两个参数互斥）：
-
-- `--avhw`：avformat 解封装后强制原生 VideoToolbox 硬解，创建会话和处理帧时的硬解错误直接退出，不回退。
-- `--avsw`：直接通过 FFmpeg `libavformat` 解封装、`libavcodec` 软解，不创建硬解会话。
-- 两者省略：先尝试硬解。仅硬解错误触发一次完整重试：报告原始诊断，销毁解码、编码与封装状态，清理临时输出，重新打开输入并从头软解。软解再失败则退出；编码、滤镜、输入时间轴、音轨和写文件错误不重试。
-
-两条路径共用同一个 avformat 输入上下文：选取视频轨与第一条音轨，按需读取，音视频交织缓存限制为 64 MiB / 4096 包。没有 AVFoundation 输入依赖。硬解路径将 avcC / hvcC 或 Annex B 参数集构造成 CoreMedia 格式描述，把 H.264 / HEVC NAL 统一为四字节长度前缀，AV1 使用 av1C；之后显式调用并验证 VideoToolbox。支持的硬解视频适配仍是 H.264、HEVC、AV1，不根据芯片名称推断可用性。硬解 B 帧显示队列上限 32 帧，容器缺失 DTS 时不伪造 DTS。
-
-软解路径直接将同一解封装器的数据包提交 `libavcodec`，不执行 `ffmpeg` 子进程；只选择软件解码器和 CPU 像素格式，处理 send/receive、B 帧与 EOF 排空，将 8/10-bit 4:2:0 帧无损重排为 Metal 兼容 NV12/P010。其他软解像素布局直接报错，不隐式转换色度或位深。
-
-两条路径都保留整数有理数 PTS、VFR 和源颜色信息；软解检测损坏帧、尺寸或格式变化并报错。H.264 / HEVC 编码始终沿用原生 VideoToolbox 硬件编码器，强制并检查实际硬件后端。成功日志分别报告软解或硬解，不把软解标为“硬解已验证”。
-
-```bash
-./build/dev/vtenc --avhw -i input.mkv -o build/hardware.mp4
-./build/dev/vtenc --avsw -i input.ts -o build/software.mp4
-./build/dev/vtenc -i input.anything -o build/automatic.mp4
-
-# 策略测试不创建硬件会话；集成验证必须显式运行
-ctest --preset dev -R '^vtenc.decode-policy$'
-python3 tests/decode_modes_hardware.py --vtenc build/dev/vtenc
-python3 tests/avformat_hardware.py --vtenc build/dev/vtenc
-```
-
-2026-11-17 已在本机用 FFmpeg 9.0.2 完成解码模式的 13 个成功转码用例的独立码流 / PTS 验证，覆盖 H.264、HEVC、AV1 的 8/10-bit 软解、VFR 与 AAC 保真、旋转、默认硬解和强制硬解，以及两种交错样片的软解 / 自动回退 Bob。另验证了互斥参数、只重试一次、迟发损坏包、SIGINT、输出防覆盖和 HDR 拒绝；未执行全量测试。Telecine 样片的逐帧场标记存在变化，Bob 验证显式使用 `--field-order tff`。
-
-统一 avformat 输入后，另完成 20 个新增输入转码用例：MKV/TS 的 H.264 VFR 与 HEVC 10-bit、WebM AV1、错误 / 未知 / 无扩展名、交错输入软解及一次自动回退、标准输入。验证完整码流、逐帧 PTS、末帧时长、AAC 压缩内容和解码 PCM；音频换算误差不超过半个输出采样刻度。原有 MP4/MOV 硬解转码、音轨 / 旋转、取消与写入失败回归也通过。未运行全量测试。
-
-FFmpeg 来自外部安装，本仓库没有复制其上游实现。FFmpeg 的基础许可证为 LGPL 2.1-or-later，启用 GPL/version3 等配置会改变该构建的许可证；本机 Homebrew 库启用了 GPL 与 version3。分发时须按实际链接库的许可证提供对应源码、配置及声明，不能将任意 Homebrew 构建视为 LGPL-only。见 [FFmpeg 许可证说明](https://ffmpeg.org/legal.html)。VTEnc 不调用 FFmpeg 的视频编码 API。
-
-默认音频通过 avformat 读取并复制到所选输出容器；显式 `--audio-codec aac` 启用下述 P5 转码。复制模式下，必要时由封装器执行 AAC ADTS → AudioSpecificConfig 位流适配。默认复制第一条音轨，`--no-audio` 禁用。与目标容器不兼容的音频直接报错并提示 `--no-audio`。AVPacket 的 priming / trim 边信息随包传入封装器，能否写入取决于目标格式（例如 TS 不保存 AAC priming / trim）；不同容器的音频首尾解码采样数可能不同。音视频共用输入时间原点，不分别归零。
-
-视频 PTS 使用整数有理数传递，相邻 PTS 决定显示时长。TS 等容器可能没有末帧 duration：此时明确打印诊断并沿用前一个显示间隔；只有一帧且无 duration 时仍报错。音视频的输入时钟未必能精确映射到封装器选定的输出时钟（例如 MKV 常用 1/1000，TS 使用 1/90000）；写入时采用整数有理数就近舍入，误差不超过半个输出刻度，并首次打印换算诊断。可精确表示时不舍入；输出时钟若把不同视频帧的 PTS 或有效时长压成同一刻度，直接报错。封装器最终可保存的时长、旋转与边信息取决于格式；裸码流没有容器级时间戳。源音频 PTS 不递增、损坏包、流参数变化或目标封装失败均直接退出。
-
-当前限定一个视频轨；HDR 输入必须显式指定 `--vpp-colorspace`，交错输入必须显式启用 Bob、IVTC 或 YADIF。支持位深、尺寸和色彩空间转换；不支持 Dolby Vision、多音轨选择、软字幕透传、章节与附件；外部 ASS/SSA 烧录见 P6。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
-
-本地文件任务取消或运行错误不发布成品，临时目录自动清理；成功写完 trailer、检查写入错误并关闭文件后，以不覆盖既有文件的方式发布。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
-
-已使用 `video_samples` 的全部 13 个原始样片实施正向转码或明确拒绝检查，另以无重编码派生 MOV 验证输入容器和旋转。9 个成功转码用例的码流和时间轴均通过独立检查，VFR 音轨逐包哈希、PTS 和解码 PCM 完全一致。详见 [P2 验证记录](docs/P2验证.md)。
-
-## P5 时间轴、DAR 与 AAC
-
-```bash
-# 默认 VFR；CFR 模式必须显式给出目标有理数帧率
-./build/dev/vtenc -i input.mp4 -o build/cfr.mp4 --avsync cfr --fps 30000/1001
-./build/dev/vtenc -i input.mp4 -o build/constant.mp4 --avsync forcecfr --fps 24000/1001
-
-# 最终显示比例；只改 SAR 标签，不添加缩放
-./build/dev/vtenc -i input.mp4 -o build/aspect.mp4 --dar 16:9
-
-# 第一条音轨转为 Apple AAC-LC，显式重采样为 48 kHz
-./build/dev/vtenc -i input.mov -o build/aac.mp4 --audio-codec aac \
-  --audio-bitrate 192 --audio-samplerate 48000
-```
-
-`--avsync vfr` 是默认值，保留源显示 PTS。`cfr` 与 `forcecfr` 在 Bob／IVTC、几何与色彩处理之后重采样，网格为 `第一帧 PTS + n × fps_den/fps_num`；采用当前时刻最近的已开始画面，间隔内没有新画面就重复，已经跨过的画面丢弃，不做运动插帧。前向跳跃保持上一画面；重复、倒退或无法精确表示的时间戳报错，不移动音轨。`cfr` 截短最后不足一周期的输出，保持视频尾点；`forcecfr` 保持每帧完整周期，尾点最多延长不足一周期。终端进度统计输出帧数，复制／AAC 的音频不随视频变速或补静音。原始帧已经由 `--fps` 定时，不接受 `--avsync`。
-
-`--dar NUM:DEN` 表示**显示旋转之后**的宽高比。未旋转或旋转 180° 时，`SAR = DAR × 最终高度/最终宽度`；90°／270° 时先取 DAR 倒数。先裁剪、再缩放，按最终存储尺寸计算并约分，视频像素不因 DAR 覆盖而改变；镜像可以保留，带缩放、错切或任意角度的显示矩阵不能和 DAR 覆盖组合。SAR 分子、分母必须能装入 H.264／HEVC 的 16-bit 扩展 SAR 字段；每个实际编码格式描述会核对请求值。无覆盖时维持既有 SAR 传递行为。旋转仍是容器元数据；裸码流只有 SAR，不能表达完整的旋转后显示语义。
-
-`--audio-copy`（默认）、`--no-audio`、`--audio-codec aac` 三选一。AAC 只处理第一条音轨，缺音轨直接报错；使用 `libavcodec` 音频解码、`libswresample` 浮点重采样和 AudioToolbox C API 编码，不调用 FFmpeg／qaac 子进程，也不调用 FFmpeg 视频编码器。AAC-LC、ABR，默认 192 kbit/s，`--audio-bitrate` 单位为 kbit/s；编码器质量设为 Apple High，所有属性检查返回值并读回，不支持的码率不自动调整。当前保留 mono／stereo 声道布局，不隐式混音；输出采样率保留源值或用 `--audio-samplerate 44100|48000` 指定，其他输出采样率明确拒绝。重采样起点就近对齐到输出采样时钟，最多半个采样误差并输出诊断，后续按整数样本计数，不累计舍入误差。音频时间戳断裂或中途格式变化报错。
-
-AAC 处理解码器、重采样器和编码器的排空，实际查询 priming，记录尾部 padding。MOV／MP4 使用完整 AAC 包时长及精确编辑列表区分媒体样本与有效播放区间，保留原 A/V 起点；尾部 moov 限制为 64 MiB，MOV 的有效音频起点须非负。发布前由 Apple AudioFile API 回读有效采样表；其他封装器使用 avformat 回读包数、时间戳和 skip/discard 信息，丢失裁剪信息则失败，不发布成品。已验证 MP4、MOV、MKV；TS 和裸流不能保留本模式要求的首尾裁剪，会报错。输出依然由 avformat 选择，没有格式白名单。
-
-AAC 转码当前要求文件输出；stdout 继续支持音频复制／关闭。MOV 家族的 AAC 输入额外通过 AudioFile 读取第一音轨的有效采样数，修正当前 FFmpeg 对带起始空编辑的尾部裁剪解释；媒体包仍全部由 avformat 解封装、libavcodec 解码。这类输入需要可被系统元数据解析器读取的本地文件；stdin／URL 或系统解析器不支持的文件明确报错。当前 FFmpeg 对带正起点或极短有效区间的 MOV／MP4 AAC 解码，可能仍输出不符合编辑区间的尾部采样；请用遵守该区间的解码器，或明确按编辑区间裁剪。测试用 Apple `afconvert` 独立解码并比对有效采样数与首尾 PCM，不将“可播放”视为同步通过。
-
-qaac 自 v3.00 起支持原生 macOS 构建，可继续由 NegativeEncoder 作为外部音频 CLI 使用；VTEnc 内部直接调用同一 Apple 编码器体系的 AudioToolbox，不嵌入 qaac。两者的默认码控、预处理和首尾处理可能不同，不承诺结果逐字节相同。依据：[qaac 发布说明](https://github.com/nu774/qaac/releases/tag/v3.00)、[Apple AAC 延迟与编辑结构](https://developer.apple.com/documentation/quicktime-file-format/using_track_structures_to_represent_encode_delay_explictly)。
-
-本机验证范围、命令与结果见 [P5 验证](docs/P5验证.md)。
-
-## P3 GPU 缩放、裁剪与基础色彩转换
-
-```bash
-# 在存储像素坐标裁去左/上/右/下边缘，再缩放；同时将 10-bit 转成 8-bit
-./build/dev/vtenc -i tests/video_samples/decode/hevc_10bit.mp4 \
-  -o build/scaled.mp4 --crop 16,8,16,8 --output-res 640x352 --no-audio
-
-# 明确指定源矩阵解释，转换为 BT.601 系数、full range、HEVC Main10
-./build/dev/vtenc -i tests/video_samples/decode/h264_8bit.mp4 \
-  -o build/color.mp4 --input-matrix bt709 --output-matrix bt601 \
-  --output-range full --codec hevc --output-depth 10 --no-audio
-
-# 显式执行相关检查；硬件检查不会注册到默认 CTest
-ctest --preset dev -R '^vtenc.cli$'
-./build/dev/vtenc_gpu_filter_test
-python3 tests/filter_hardware.py --vtenc build/dev/vtenc
-```
-
-这些滤镜用于所有 avformat 压缩输入。处理顺序是裁剪、双线性采样、YCbCr 矩阵 / range / 位深转换。`--crop LEFT,TOP,RIGHT,BOTTOM` 是四个非负偶数边距，必须留有正偶数宽高；坐标基于未应用容器旋转的存储像素。省略 `--output-res` 时输出裁剪后的尺寸，显式指定时精确拉伸到目标偶数宽高，保留源像素宽高比，不自动补黑边。几何变换后 clean aperture 重置为完整输出栅格；容器显示方向保持，平移按新尺寸调整。
-
-`--output-depth` 决定文件输出位深，默认仍为 8；10-bit 文件输入配合默认参数现在会通过 Metal 转成 8-bit。`--output-range limited|full` 默认保留源范围。`--output-matrix bt601|bt709|bt2020nc|smpte240m` 默认保留源矩阵，只改变 YCbCr 系数，不改变 primaries / transfer，也不是完整 BT.601/BT.709 色域转换。`--input-matrix` 明确覆盖源矩阵解释；当转换需要矩阵但解码缓冲区和格式描述未提供支持的值时必须指定，不按尺寸猜测。
-
-支持 left、center、top-left 输入色度位置，Metal 输出统一重采样为 left。优先读取解码缓冲区 / 格式描述；缺失或不支持时需要 `--input-chroma-loc left|center|top-left` 明确解释。转换后的实际码流位深、range、颜色和色度标记会核查，不能仅修改标签冒充转换。
-
-GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理路径不锁定或复制 CPU 像素，无 CPU 滤镜回退。每帧等待 Metal 命令成功完成后提交硬编，保留原 PTS / duration，输出缓冲池最多 3 个。任务结果中的 `Metal GPU frames completed` 统计成功提交硬编的已完成 GPU 帧；无需滤镜且位深相同时为 0。
-
-当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持物理旋转、Bicubic/Lanczos；字幕合成见 P6，运动自适应反交错见 P7。
-
-2026-11-17 已在本机完成 240 组 GPU 逐像素参考比对、`video_samples` 的 11 个成功转码用例和 6 个拒绝用例，以及 P2 回归；详见 [P3 验证记录](docs/P3验证.md)。结果不代表其他硬件、系统或任意尺寸已验证，也不承诺零拷贝或长期吞吐量。
-
-## Metal 色彩空间转换
-
-参考 [NVEnc 的 --vpp-colorspace](https://github.com/rigaya/NVEnc/blob/5bb35d860bc5f877b01fe60e4de5ac756b9b80ed/NVEncC_Options.en.md#--vpp-colorspace-param1value1param2value2)，将核心矩阵、传递函数和色域算法移植为 Metal；许可证和来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。这不是 NVEnc 全部参数的兼容实现。
-
-```bash
-# SDR BT.709 转为 BT.2020 色域与矩阵；保留原传递函数
-./build/dev/vtenc -i input.mp4 -o bt2020.mp4 --codec hevc --output-depth 10 \
-  --vpp-colorspace matrix=auto:bt2020nc,colorprim=auto:bt2020
-
-# PQ BT.2020 转为 BT.709，100 cd/m² 为线性光 1.0；超过输出范围的亮部会裁切
-# 这是色度学转换，不是保留高光层次的 HDR tone mapping
-./build/dev/vtenc -i hdr10.mp4 -o bt709.mp4 --codec hevc --output-depth 10 \
-  --vpp-colorspace matrix=auto:bt709,transfer=auto:bt709,colorprim=auto:bt709,sdr_source_peak=100
-
-# 显式解释源值，并按场景参考的传递曲线转换
-./build/dev/vtenc -i input.mp4 -o converted.mp4 \
-  --vpp-colorspace matrix=smpte170m:bt709,colorprim=smpte170m:bt709,transfer=bt709:srgb,range=limited:full,scene_ref=true
-```
-
-| 参数 | 支持值 |
-| --- | --- |
-| `matrix=源:目标` | `bt601`（`smpte170m` / `bt470bg`）、`bt709`、`smpte240m`、`bt2020nc`（`bt2020`） |
-| `transfer=源:目标` | `bt709`（`smpte170m` / `bt2020-10` / `bt2020-12`）、`linear`、`srgb`（`iec61966-2-1`）、`smpte2084`（`pq`）、`arib-std-b67`（`hlg`） |
-| `colorprim=源:目标` | `bt709`、`smpte170m`（`smpte240m`）、`bt470bg`、`bt2020`、`display-p3`（`smpte432`）、`dci-p3`（`smpte431`） |
-| `range=源:目标` | `limited`、`full` |
-| `scene_ref` | `false`（默认，显示参考）或 `true`（场景参考） |
-| `sdr_source_peak` | 线性光 1.0 对应的亮度，默认 100 cd/m²，范围 `[0.01,10000]` |
-
-四组源/目标参数均支持 `auto`：源从解码帧附件优先、轨道元数据次之读取；目标继承已解析的源值（`hdr2sdr` 的默认目标例外，见下节）。省略的参数等价于 `auto:auto`。显式源值覆盖解释，目标值用于实际像素变换和输出标签；所需元数据缺失或不支持时直接报错，不按尺寸猜测。与旧的 `--input-matrix` / `--output-matrix` / `--output-range` 互斥，避免顺序相关的覆盖。原始帧路径仍不接受本选项。
-
-转换在浮点 Metal 内核中依次执行：范围归一化 → YCbCr 转 R′G′B′ → 逆传递函数 → 线性 RGB 色域矩阵（需要时做 Bradford 白点适应）→ 目标传递函数 → 目标 YCbCr → 量化。仅矩阵/范围转换和身份转换跳过不必要的传递函数往返。非线性转换后才做垂直两点色度降采样，保持 left 相位；支持与裁剪、缩放、Bob 组合。
-
-与 NVEnc 一致，显示参考 BT.709 使用理想 BT.1886 gamma 2.4；`scene_ref=true` 切换为 BT.709 OETF。PQ 以 10000 cd/m² 归一化；HLG 显示参考采用 1000 cd/m²、gamma 1.2 的亮度相关 OOTF，场景参考采用逆/正 OETF 与 12 倍标度。HLG 在逆 OETF **之后**计算场景线性亮度并应用 OOTF，与参考版本对编码 RGB 先作亮度校正的顺序不同，保证正反变换互逆。PQ 输入负值及超过 1.0 的非法信号先限幅，避免有理式奇点；色域转换不做中间 RGB 限幅，传递函数按自身定义处理负值，最终输出超范围值裁切。
-
-当前没有移植 LUT3D、`approx_gamma` LUT 近似、RGB 平面、YCgCo、BT.2020 constant-luminance 或其他未列出的曲线/基色；请求这些参数会报错。未启用 `hdr2sdr` 时，HDR 转 SDR 不会自动压缩高光；HDR 输出的矩阵、传递函数、基色和范围随转换设置，静态 mastering display / content light 信息按 P6 的适用性策略保留、清除或显式设置。Dolby Vision 始终拒绝。编码器必须确认输出色彩标记，否则任务失败。
-
-### HDR→SDR tone mapping
-
-```bash
-# 默认目标 BT.709；默认源峰值 1000 cd/m²、SDR 白点 100 cd/m²
-./build/dev/vtenc -i hdr10.mp4 -o sdr.mp4 --codec hevc --output-depth 10 \
-  --vpp-colorspace hdr2sdr=hable
-
-# PQ 或 HLG 都可接入；源色彩标记缺失时使用已有 FROM:TO 参数显式声明
-./build/dev/vtenc -i hlg.mp4 -o sdr-hlg.mp4 --avsw --input-chroma-loc left \
-  --vpp-colorspace hdr2sdr=bt2390,source_peak=1000,ldr_nits=100
-
-# Mobius 保留 transition 以下线性响应；降低去饱和强度保留更多 RGB 比例
-./build/dev/vtenc -i hdr10.mp4 -o sdr-mobius.mp4 \
-  --vpp-colorspace hdr2sdr=mobius,transition=0.3,peak=1,desat_strength=0.5
-
-./build/dev/vtenc -i hdr10.mp4 -o sdr-reinhard.mp4 \
-  --vpp-colorspace hdr2sdr=reinhard,contrast=0.5,peak=1,source_peak=4000,ldr_nits=203
-```
-
-`hdr2sdr=none|hable|mobius|reinhard|bt2390` 默认 `none`。启用时只接受 PQ/HLG 输入，要求 `scene_ref=false`；源矩阵、基色和传递函数仍从元数据读取或显式覆盖，不猜测为 HDR10。输出矩阵、传递函数和基色的 `auto` 改为 **BT.709**，范围仍继承源；可显式选择其他已支持 SDR 色彩空间，但不能输出 PQ/HLG。输出位深仍由 `--output-depth` 决定，默认 8-bit。
-
-处理顺序为逆传递函数 → **源色域的线性 RGB tone mapping 与高光去饱和** → 目标色域矩阵 → SDR 传递函数。与 NVEnc 一致，去饱和将保持 RGB 比例的亮度缩放结果与逐通道曲线结果混合；`desat_strength=0` 保持 RGB 比例。不做局部/逐帧自适应映射，也不读取 MaxCLL 自动猜测 `source_peak`。
-
-| 参数 | 默认值 | 校验范围 / 适用曲线 |
-| --- | --- | --- |
-| `source_peak` / `ldr_nits` | 1000 / 100 cd/m² | `1 <= ldr_nits <= source_peak <= 10000` |
-| `desat_base` / `desat_strength` / `desat_exp` | 0.18 / 0.75 / 1.5 | `[0,1]` / `[0,1]` / `[0.01,10]`，四种曲线通用 |
-| `a,b,c,d,e,f` | 0.22,0.3,0.1,0.2,0.01,0.3 | 仅 Hable；`a,e∈[0,10]`、`b,d,f∈[0.0001,10]`、`e<f`、`e/f<=c<=1`，曲线不能恒为零 |
-| `transition` | 0.3 | 仅 Mobius，`[0,0.999]` |
-| `peak` | 1 | Mobius / Reinhard，`[0.001,100]`；Mobius 另要求 `peak*source_peak/ldr_nits >= 1` |
-| `contrast` | 0.5 | 仅 Reinhard，`[0.001,0.999]` |
-
-参数须有限，重复参数、为错误曲线设置参数、未启用映射却设置调节参数均报错。HDR2SDR 统一以 `ldr_nits` 作为线性 RGB 的亮度标度；若同时显式设置 `sdr_source_peak`，必须与其相等。这避免参考实现两个独立亮度标度不一致时，声明峰值与曲线白点错位。
-
-四种曲线均按所选 NVEnc 版本移植：Hable 用声明峰值归一化有理曲线；Mobius 在 transition 处平滑连接；Reinhard 用 `(1-contrast)/contrast` 控制映射；BT.2390 在 PQ 域使用 Hermite 肩部曲线。**BT.2390 保留该 NVEnc 实现 PQ 辅助函数的 203 参考白倍率**，不宣称与其他软件的同名映射逐位一致。针对数值边界，Hable/Mobius 使用代数等价的稳定表达式，Mobius 有效峰值为 1 时为身份映射；BT.2390 将超声明源峰值的输入限制到峰值后再进肩部，避免多项式外推反转高光，源/目标峰值相等时为身份映射。最终量化仍会裁切目标色域外的值。
-
-显式验证（不运行全量测试）：
-
-```bash
-ctest --preset dev -R '^vtenc.cli$'
-ctest --preset dev -R '^vtenc.colorspace$'
-./build/dev/vtenc_gpu_filter_test
-python3 tests/colorspace_hardware.py
-python3 tests/colorspace_hardware.py --tone-mapping
-```
-
-2026-11-17 本机通过 980 个 GPU 像素用例；基础色彩转换验证了 6 个真实码流，tone mapping 追加验证了 9 个映射输出和 1 个裁切对照，见 [色彩空间验证记录](docs/色彩空间验证.md)。
-
-## P6：字幕、颜色标签与静态 HDR 元数据
-
-```bash
-# 外部 UTF-8 ASS / SSA；布局及字形光栅化由 libass 完成，图层及视频像素合成由 Metal 完成
-./build/dev/vtenc -i input.mkv -o subbed.mp4 --codec hevc \
-  --vpp-subburn 'filename=subtitles.ass,fontsdir=fonts,ts_offset=0.125,opacity=0.9'
-
-# 可重复传入，后面的字幕文件叠在前面之上；路径内的逗号需要内层引号
-./build/dev/vtenc -i input.mp4 -o layers.mp4 \
-  --vpp-subburn "filename='字幕,中文版.ass',fontfile=/path/to/font.otf" \
-  --vpp-subburn 'filename=signs.ass,clip=32:24:640:360'
-
-# PQ 字幕白明确为 203 cd/m²，HLG 使用同一 white 定义
-./build/dev/vtenc -i hdr10.mp4 -o subbed-hdr.mp4 --codec hevc --output-depth 10 \
-  --vpp-colorspace hdr2sdr=none --vpp-subburn 'filename=subtitles.ass,white=203'
-
-# 仅修改输出标签；像素转换仍使用 --vpp-colorspace
-./build/dev/vtenc -i input.mp4 -o tagged.mp4 \
-  --color-tags matrix=bt709,transfer=bt709,colorprim=bt709
-
-# 显式 HDR10 静态元数据，单位和顺序见下文；不猜测输入的 mastering display
-./build/dev/vtenc -i hdr10.mp4 -o explicit-hdr.mp4 --codec hevc --output-depth 10 \
-  --vpp-colorspace hdr2sdr=none \
-  --master-display 8500,39850,6550,2300,35400,14600,15635,16450,10000000,50 \
-  --max-cll 1000,400
-```
-
-字幕支持 avformat 文件输入和 `--avsw` Y4M 管道；原始 NV12/P010 / synthetic 路径不接受字幕及 P6 输出元数据参数，可改用 Y4M。只处理外部 ASS/SSA，不自动选择容器软字幕、提取内嵌字体或转换 SRT/位图字幕。最多 8 个字幕文件，ASS 内部的 Layer、样式、定位、动画、裁剪、描边和阴影由 libass 处理，严格按其返回的图像顺序合成。
-
-`fontsdir` 加载一层目录内的 TTF/OTF/TTC/OTC，`fontfile` 加载单个字体（两者可同时指定）。显式资源先检查可读性并用 FreeType 验证；无效或空字体目录、缺文件、无字幕事件、无法找到字形均报错。默认替代字体族为 `Arial`，可用 `font=族名` 修改；CoreText 按 ASS 样式找字体并进行字形级替代，实际选择和替代诊断写 stderr。字体选择与已安装字体有关，需要可重复结果时应提供相同字体资源。系统字体选择中的可恢复失败也保留诊断，不静默吞掉。
-
-处理顺序为解码 → IVTC／Bob → 裁剪、缩放、颜色及位深转换 → VFR／CFR → 字幕 → 输出标签／静态元数据 → VideoToolbox 硬编码。字幕按最终存储尺寸和最终 SAR 布局；`--dar` 覆盖也参与布局。显示旋转仍是封装元数据，会旋转整幅画面及字幕；本阶段不提供保持字幕朝向的物理旋转。
-
-字幕时钟为**绝对输出 PTS**，不自动减去第一帧或音轨起点。`ts_offset` 为有符号秒，最多三位小数；正数延后。先用整数有理数减去偏移，再向负无穷取整至 libass 毫秒时钟。ASS 的开始时刻包含、结束时刻不包含；CFR 重复画面也按各自输出 PTS 重新查询字幕。`opacity=0..1` 乘以 ASS 自带透明度；`clip=X:Y:W:H` 在最终存储像素上额外裁剪图层，允许奇数坐标。字幕文件内的裁剪和图层顺序仍有效。
-
-Metal 使用 RGBA32Float 缓存预乘线性光字幕图层，仅 libass 报告变化时重建；CPU 只上传字形覆盖掩码，不读取、混合或光栅化视频像素。SDR 字幕 RGB 按视频传递函数／基色解释，并遵循 ASS `YCbCr Matrix`（None、TV/PC.601、709、240M、FCC；缺省为 TV.601）。PQ／HLG 字幕统一视为 sRGB / BT.709，转换至输出基色；HDR 不采用旧式 YCbCr mangling。合成在线性显示光域完成，`white=1..1000` 指定字幕白的 cd/m²，默认 203。PQ 使用绝对亮度；HLG 明确采用 1000-nit 显示器、system gamma 1.2。SDR 的 `white` 不改变相对亮度。输出显式量化至 NV12/P010，色度采用 left siting，覆盖区域经水平 `[1,2,1]`、垂直双采样下采样；无覆盖的像素保留原值。无 GPU 或 GPU 执行失败直接报错，没有 CPU 视频合成回退。
-
-资源上限：每个字幕／字体文件 64 MiB、每字幕轨显式字体累计 256 MiB、字体目录最多 256 个字体文件、每帧掩码累计 256 MiB、RGBA32Float 图层 512 MiB（可容纳 7680×4320）。输出缓冲池有上限，一次一个 Metal command buffer。长片仍按帧流式处理，不缓存所有视频帧。
-
-`--color-tags` 只覆盖编码器和封装器的 matrix / transfer / colorprim，不参与上游像素计算，不接受 `auto` 或 FROM:TO。范围转换继续使用 `--output-range` 或 `--vpp-colorspace range=FROM:TO`，不提供伪装成仅标签的 range 操作。输出码流与请求的色彩标签不一致会失败。
-
-`--hdr-metadata auto|clear|preserve` 默认 auto：仅在 HEVC Main10、PQ / BT.2020 NCL，且原静态数据仍适用时保留。字幕、几何／场处理、CFR、颜色转换／源解释覆盖等可能使旧值失效；auto 清除并诊断，preserve 拒绝这类组合，或要求用显式值替换失效字段。HDR→SDR、HLG 或其他非 HDR10 输出不保留静态 HDR10 信息。`clear` 与显式设置互斥；未提供且源中不存在的数据保持不存在。流中变化的静态 HDR 元数据不支持，直接报错。
-
-`--master-display` 是 `Gx,Gy,Bx,By,Rx,Ry,Wx,Wy,maxL,minL` 的十个整数，色度坐标以 0.00002 为单位，亮度以 0.0001 cd/m² 为单位；`--max-cll` 是 `MaxCLL,MaxFALL`，单位 cd/m²。输入数值验证后以标准大端 SEI 布局传给 VideoToolbox；对硬件压缩包中的静态 HDR SEI 再按最终策略整理，在同步帧前写入所需值。这样可保留 CoreVideo 会省略的全零 Content Light 信息，并确保 clear 不残留旧 SEI；不改动压缩图像数据。硬解路径读取源 HEVC SEI，软解路径读取 AVFrame side data；对适用的封装器同时提供静态 side data。
-
-参数集策略不依赖用户维护格式白名单：原始 / synthetic Annex B 写入器在每个同步帧前写 SPS/PPS（HEVC 加 VPS）；avformat 输出向封装器提供 avcC/hvcC 和带长度前缀的包，由封装器及其自动 bitstream filter 按格式处理。H.264/HEVC 裸流和 TS 的同步帧重复参数集；MP4/MOV 使用配置记录，HEVC 在支持时使用 hvc1，不强行插入 in-band 参数集。stdout 与文件采用相同封装规则，仍必须显式 `-f`，开始写出后不允许从头重试。
-
-本机验收与限制见 [P6 验证](docs/P6验证.md)。这不是 NVEnc `--vpp-subburn` 全参数兼容，也不代表所有 Apple Silicon 或旧 macOS 已验证。
-
-## P7：Metal YADIF 运动自适应反交错
-
-```bash
-# 自动逐帧识别场结构；每个显示场对输出一帧
-./build/dev/vtenc --avsw -i interlaced.mp4 -o build/yadif.mov --vpp-yadif
-# 场倍输出：30000/1001 场对/s -> 60000/1001p，保留两场的运动时刻
-./build/dev/vtenc -i interlaced.mp4 -o build/yadif60.mov --vpp-yadif mode=bob
-# 将逐行编码的交错栅格显式解释为 BFF
-./build/dev/vtenc -i woven.mp4 -o build/yadif-bff.mov --vpp-yadif mode=bob_bff
-```
-
-`--vpp-yadif [mode=auto|tff|bff|bob|bob_tff|bob_bff]` 参考 NVEnc 的 MIT 许可 YADIF 实现。Metal 在三帧窗口内做方向插值与时间差约束；静止区域保留细节，运动区域重建缺失行。Y、U、V 分别处理，生产路径没有 CPU 滤镜或软件视频编码回退。源代码、固定上游版本与许可证见 [第三方说明](THIRD_PARTY_NOTICES.md)。
-
-| mode | 输出数量 | 场解释 |
-| --- | --- | --- |
-| `auto`（默认） | 每显示场对一帧 | 逐帧元数据；逐行画面保留，交错画面保留先到场、重建后到场 |
-| `tff` / `bff` | 每显示场对一帧 | 强制先到场为上场／下场 |
-| `bob` | 每显示场对两帧 | 逐帧元数据；逐行画面复制为两个半帧区间 |
-| `bob_tff` / `bob_bff` | 每显示场对两帧 | 强制 TFF／BFF，按场时间先后输出 |
-
-`--field-order tff|bff` 可覆盖 `auto` / `bob` 的源解释；与显式模式场序冲突时报错。自动模式不猜测缺失的场结构或场序。三个反交错入口 `--deinterlace bob`、`--vpp-ivtc`、`--vpp-yadif` 互斥。
-
-顺序为 HEVC 单场配对 → RFF 展开 → YADIF → 裁剪／缩放／色彩转换 → CFR（若启用）→ 字幕 → 硬件编码。原始 RFF 场序与 HEVC 空间奇偶优先于全局场序覆盖；YADIF 不做电影 cadence 去重。孤立场只输出一帧并保留其自身区间，缺失行只做空间重建；缺少末场 duration 时明确报错。常规首尾缺邻帧时复制当前帧作时间参考；结构边界、逐行／交错切换、场序变化不跨界借帧。
-
-保留源 VFR、非零 PTS 起点和总时长；场倍严格二等分每个显示场对区间，不先换算成浮点 FPS。`--avsync` 可随后显式转换输出频率。第一音轨复制和字幕都沿用同一输出时间轴。
-
-输入走 avformat（含显式 `--avsw` 的 Y4M 文件／stdin），仅支持 NV12/P010 8/10-bit 4:2:0、偶数宽、完整帧高度至少 8 且为 4 的倍数。紧密打包 raw／synthetic 入口不接受 YADIF，可改用带时钟与场标志的 Y4M；其颜色解释仍必须显式提供，见 P4。YADIF 按各平面原采样网格处理，要求上下场色度位置相同；后续 Metal 色彩／几何阶段统一输出 left。它不采用 Bob 的独立场色度相位重采样，不能声称与 Bob、FFmpeg YADIF 或 NVEnc 全处理链逐像素等价。
-
-实现和验证见 [P7 验证](docs/P7验证.md)。GPU 用例仅显式执行，不进入默认 CTest：
-
-```bash
-ctest --preset dev -R '^vtenc.cli$'
-ctest --preset dev -R '^vtenc.yadif-config$'
-./build/dev/vtenc_yadif_test
-python3 tests/yadif_hardware.py
-```
-
-## P3 Bob 反交错
-
-`--deinterlace bob` 对每个输入帧对的两个场分别进行垂直线性重建，按时间先后输出完整尺寸的逐行帧。Y 与 UV 都只从所选场取样；色度位置按各场坐标解释，再转换为逐行 left 色度位置。Bob 可与文件模式的裁剪、缩放和色彩转换组合；源高度和上下裁剪边距必须为 4 的倍数，以保留完整的 4:2:0 场布局。
-
-`--field-order auto|tff|bff` 默认 auto，要求解码缓冲区或格式描述有无歧义的场序；缺失时直接报错。tff/bff 是显式源解释覆盖，也可处理实际包含交错栅格但被标记为逐行编码的文件。它不是场序检测器，选错会颠倒运动时序。不启用 Bob 或 IVTC 时继续拒绝已识别的交错输入。
-
-文件模式精确拆分每帧的显示区间：第一场 PTS 为原 PTS，第二场为原 PTS 加半个 duration，两个输出 duration 相等。保留 VFR 间隔和 A/V 起点，封装视频时间基加倍，不能精确表示时失败。原音轨仍逐包复制。每场 GPU 完成后才提交硬编，保持有界资源与取消清理。
-
-```bash
-# 默认先硬解，失败后从头软解重试一次；编码仍为硬件
-./build/dev/vtenc -i interlaced.mp4 -o build/bob.mp4 \
-  --deinterlace bob --field-order tff
-
-# 已有原始交错 NV12：180 个场对 → 360 个逐行帧，30000/1001 → 60000/1001
-./build/dev/vtenc -i interlaced.nv12 -o build/bob.h264 \
-  --input-res 720x480 --frames 180 --fps 30000/1001 \
-  --deinterlace bob --field-order tff
-
-# 显式硬解 / 原始输入验证；包含离线测试夹具准备，文件输入指定 --avhw
-python3 tests/bob_hardware.py --vtenc build/dev/vtenc
-```
-
-原始 Bob 模式必须给出 tff/bff，不接受合成输入。Y 平面与交错 UV 平面都按行交织上下场，使用每场 left 色度位置、BT.709 SDR limited range；P010 仍为高 10 位存储。`--fps` / `--frames` 描述输入场对，输出数量和帧率加倍；`--gop-len` 仍计输出帧。原始模式只增加 Bob，不开放其他 GPU 滤镜参数，也不改变 P1 输入/输出同位深的约定。Annex B 时间轴以配套 CSV 为准，外部封装需使用倍频后的帧率。
-
-**本机限制：**`video_samples/deinterlace` 的普通交错和 3:2 hard telecine 原始 MP4，强制硬解均在创建会话时返回 `OSStatus=-12911`。因此这两个原始文件的完整硬解转码未通过。测试明确将其记为硬解受阻；另将样片离线导出为原始帧，实际验证 Metal Bob 与 VT 硬编，并用明确标注的逐行编码交错栅格载体 / VFR 文件验证硬解、调度和音轨复制。这是原始硬解路径的限制；新增 `--avsw` 与默认回退可直接软解这两个原始样片，再通过 Metal Bob 与 VT 硬编完成转码。原有硬件验证脚本现显式使用 `--avhw`，软解及自动重试由 `decode_modes_hardware.py` 单独验证。
-
-Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/1001p；Bob 本身不做场匹配或去重；还原电影帧请使用下面的 `--vpp-ivtc`。单场重建会损失垂直细节，细线可能闪烁。真实结果和复现边界见 [Bob 验证记录](docs/P3Bob验证.md)。
-
-## Metal IVTC：soft / hard telecine 还原
-
-`--vpp-ivtc` 在 Metal 上展开 soft telecine 的 RFF 重复场、匹配相邻帧的上下场并去重，将典型的 30000/1001 hard telecine 还原为 24000/1001 逐行输出。软硬 telecine 与普通逐行视频混合时使用 `mixed=true`，按重复证据决定是否降帧，输出可以是 VFR。普通 60i 的完整场运动恢复使用 Bob 或场倍 YADIF；IVTC 的混合模式仅在源帧率上修复真正交错片段。
-
-```bash
-./build/dev/vtenc -i telecine.mp4 -o build/film.mp4 \
-  --vpp-ivtc --field-order tff
-
-# 软/硬 telecine 与逐行视频混合，保留源时间轴及音轨
-./build/dev/vtenc -i mixed.mp4 -o build/mixed-film.mp4 \
-  --vpp-ivtc expand=auto,mixed=true
-
-# 显式软解，硬件编码；同时缩放、输出 HEVC 10-bit
-./build/dev/vtenc -i telecine.mp4 -o build/film10.mp4 --avsw \
-  --vpp-ivtc post=2,nt=10,cthresh=4,combpel=8,dthresh=7 \
-  --field-order tff --output-res 1280x720 --codec hevc --output-depth 10
-
-# 仅场匹配、不丢帧；逐帧诊断写 stderr
-./build/dev/vtenc -i telecine.mp4 -o build/matched.mp4 \
-  --vpp-ivtc cycle=0,post=0,log=true --field-order tff
-```
-
-参数可省略；重复、未知参数和越界数值直接报错。`--field-order auto|tff|bff` 与 Bob 共用：hard telecine 的逐帧场标记可能变化，此时使用已知的 tff/bff 覆盖；RFF 展开始终优先使用原始逐帧首场标记，不能用固定覆盖值破坏 3:2 交替场序。混合模式允许在边界排空后切换场序。IVTC 与 Bob 互斥，仅支持 libavformat 压缩输入。
-
-| 参数 | 默认值 | 范围及含义 |
-| --- | --- | --- |
-| `cycle` | 5 | 5：每五个显示帧最多丢一帧；0：只匹配和修复，不去重 |
-| `expand` | auto | auto/on：按逐帧 RFF 标记展开；off：关闭展开。on 不凭空生成重复场 |
-| `mixed` | false | true：保留干净逐行帧，只在干净匹配且有明显重复的周期去重；false：显式 3:2，每完整周期固定去一帧 |
-| `post` | 2 | 2：修复残留梳齿；0：关闭修复 |
-| `nt` | 10 | 0–255，匹配评分的噪声门限 |
-| `cthresh` | 4 | 0–255，评分的单像素梳齿门限 |
-| `combpel` | 8 | 1–128，每个 32×8 块判为梳齿块所需的像素数 |
-| `dthresh` | 7 | 0–255，修复的像素残差门限；0 关闭此门控 |
-| `log` | false | true/false，输出帧选择、评分、SAD 与周期丢帧位置到 stderr |
-
-`nt`/`cthresh` 按源位深换算后最小为 1 码值（与参考实现一致）；`dthresh=0` 才表示关闭像素门控。
-
-移植参考 [NVEnc IVTC](https://github.com/rigaya/NVEnc/blob/5bb35d860bc5f877b01fe60e4de5ac756b9b80ed/NVEncCore/NVEncFilterIvtc.cu)，MIT 声明保留于 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。处理如下：
-
-- 按当前显示帧场序，对 C（当前帧）、P（当前首场＋前帧次场）、N（后帧首场＋当前次场）计算亮度的五行插值误差与梳齿计数。32×8 分块后按梳齿块数量、最大块计数、裁剪均值、匹配误差排序；指标由 GPU 计算，CPU 仅汇总块统计和调度。
-- 保留上游 N→P 重复场对保护，并增加干净 P→N 候选间的连续性约束，避免压缩噪声导致漏掉一个电影时刻。首帧不借未来首场取代片段开头；相邻原始帧亮度 SAD 超过最大可能值的 20% 时禁止跨该边界借场。
-- Y 和交织 UV 在 Metal 上按同一场选择重组；残余梳齿的最大块计数达到 65 时，`post=2` 使用上游三帧时空自适应插值与像素门控。支持 NV12/P010 的 limited/full range，源高度至少 8 且为 4 的倍数。10-bit 按码值缩放门限并保持 P010 高位布局。
-- 对合成帧计算亮度 SAD，选择与前一合成帧最相似的重复帧，包含跨周期边界比较。初始帧没有前帧，不参与首次最小差值丢帧。混合模式要求无残余梳齿、存在展开/交错证据，最小 SAD 不超过最大可能 SAD 的 0.5%；未展开的周期还要求最小差值不超过周期最大差值的 1/5。证据不足保留全部帧。
-- 参考上游 pending-field 调度，将每个编码图片按 `2 + repeat_pict` 个显示场拆分，再用 Metal 重组相邻异奇偶场。支持额外 0/1/2/4 场；保留跨图片的待配对场，使用有界缓存，无需全片预扫描。源场序不连续或 EOF 剩余单场时输出诊断，以该场的源图片承载剩余时间区间，并标记边界，禁止跨边界匹配/去重。
-
-IVTC 在裁剪、缩放和色彩转换之前执行。决定去重的完整周期按原始首尾时间均分为四个输出，整数有理数计算，保留非零 PTS 起点与周期总时长；纯 hard telecine CFR 输入得到 4/5 帧率，soft telecine 先展开再还原，混合/VFR 保留每周期时长。尾部不足五帧全部输出并保留原区间，避免拉长片尾。RFF 将每个编码图片的原始时间区间按场数精确拆分，既支持 3/2 场变时长标记也支持固定编码图片时长。启用展开时封装时间基预留 12 倍精度，`cycle=5` 再扩大四倍，超出 CoreMedia 32-bit 时间基范围时明确失败。音轨继续按原时间轴逐包复制。`-o -` 的码流与 stderr 诊断分离；启动 stdout 封装后仍禁止从头重试。
-
-逐帧元数据来自 libavcodec 解码帧、原生 H.264 的 FFmpeg 元数据解析器，或独立的 HEVC SPS/PPS/VUI 与 picture-timing SEI 解析器；硬解路径不启用隐藏的软件解码。HEVC 按当前图片的 slice→PPS→SPS 关系读取 `pic_struct`、`source_scan_type` 和 `duplicate_flag`，支持 MP4 hvcC/长度前缀及 Annex B 参数集。软解通过 packet/frame opaque 数据传递标记，硬解随图片排序，B 帧重排后仍按显示顺序处理。支持完整帧 `pic_struct=0/3/4/5/6/7/8`，以及 `field_seq_flag=1` 的独立单场 `pic_struct=1/2/9/10/11/12`；`duplicate_flag` 不当作额外重复场。SPS 要求的 picture-timing 缺失、标记截断、保留值或 `pic_struct` 与 `field_seq_flag` 冲突均明确报错，不触发软解重试；多层 HEVC 仍不支持。`expand=off,mixed=true` 可保留 soft telecine 的原编码图片区间；H.264 纯 hard telecine 可用 `expand=off` 跳过原生 RFF 解析，HEVC 在 IVTC 模式下始终解析场结构。
-
-HEVC 独立场先按显示顺序配对：Metal 将半高场图片的 Y/UV 行交织为完整高度，再执行 RFF/IVTC。`pic_struct=9/10` 的前场提示参与 P 匹配，11/12 的后场提示参与 C 匹配；无提示时使用像素评分。明示的前场配对关系优先于场景切换的 SAD 启发式。实际空间奇偶由码流决定，`--field-order` 不会把上场误作下场。组帧不受 `expand=off` 影响，可直接使用 `--vpp-ivtc mixed=true`。
-
-片尾落单场、缺少前配对场或同奇偶场冲突会输出诊断，通过 Metal 空间插值补齐缺失行，保留该场原始时间区间，并隔断跨边界匹配和去重；缺少末场有效时长则报错。裁剪、缩放和硬件编码使用组帧后的完整高度，SAR 保留，clean aperture 的垂直坐标同步扩大。解码尺寸或色彩布局中途改变仍明确拒绝。本机已验证原生 HEVC 单场硬解；其他系统若无法返回逐图片半高栅格，按现有硬解失败策略处理。
-
-这不是完整 NVEnc 兼容层：未移植全片预扫描、cadence lock、双场序置信度分类或五帧 BWDIF，未强制上游式全片 CFR。混合分类是保守的局部像素/元数据判断，不能保证所有噪声、字幕、静止段和剪辑断点都恢复严格电影 cadence；证据不足或不足五帧时允许保留重复。`mixed=false,cycle=5` 仍明确假设 3:2；`cycle=0` 保留展开后的显示帧数量。压缩破坏和真正交错片段中的不可恢复场仍可能需要插值。
-
-显式运行相关验证：
-
-```bash
-ctest --preset dev -R '^vtenc.cli$'
-ctest --preset dev -R '^vtenc.timeline$'
-./build/dev/vtenc_ivtc_test
-python3 tests/ivtc_hardware.py --vtenc build/dev/vtenc
-python3 tests/rff_hardware.py --vtenc build/dev/vtenc
-ctest --preset dev -R '^vtenc.hevc-cadence$'
-python3 tests/hevc_rff_hardware.py --vtenc build/dev/vtenc
-python3 tests/hevc_fields_hardware.py --vtenc build/dev/vtenc
-```
-
-2026-11-17 本机验证覆盖 IVTC/RFF 数值与调度、原有 9 个 hard-telecine 输出、12 个 H.264 soft/mixed 输出，以及 HEVC 元数据解析、Main/Main10 混合码流和 B 帧重排；原始 telecine 的 180→144 帧恢复平均 PSNR 为 43.34 dB。详见 [Metal IVTC 验证记录](docs/MetalIVTC验证.md)。
-
-## 代码布局
-
-视频测试素材见 [tests/video_samples/README.md](tests/video_samples/README.md)：包含 H.264 / HEVC / AV1 的 8/10-bit 输入、HLG / HDR10 / Dolby Vision、普通交错 / Telecine，以及带音轨的 VFR。下载、生成和校验按需运行，不加入默认 CTest。
-
-```text
-include/vtenc/        纯 C++ 公共接口
-src/cli/             CLI 入口和输出
-src/core/            参数解析与业务规则
-src/apple/           VideoToolbox C++ 适配、CF RAII、Metal Objective-C++ 桥接
-tests/               按范围选择的验证
-scripts/             环境检查与开发辅助
-docs/                开发方案
-```
-
-VideoToolbox、CoreMedia、CoreVideo、FFmpeg 提供 C API，直接使用 `.cpp`；当前仅 Metal 的 Objective-C API 桥接使用 `.mm`，不将 Objective-C 类型传播到公共接口。
+仅签名时可省略 `--notary-profile`。提交公证后，脚本等待 Apple 返回结果，并将结果文件保存到 `build/packages/`；公证不通过时退出报错。证书私钥和公证凭据应保存在本机钥匙串中。
