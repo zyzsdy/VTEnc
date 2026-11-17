@@ -91,7 +91,7 @@ CFRef<CMVideoFormatDescriptionRef> output_format(const EncodeConfig& c,CMFormatD
         is(kCVImageBufferTransferFunctionKey,kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) &&
         is(kCVImageBufferColorPrimariesKey,kCVImageBufferColorPrimaries_ITU_R_2020) &&
         is(kCVImageBufferYCbCrMatrixKey,kCVImageBufferYCbCrMatrix_ITU_R_2020);
-    bool changed=!c.subtitles.empty()||c.filter.bob||c.filter.ivtc.enabled||c.sync!=SyncMode::vfr||
+    bool changed=!c.subtitles.empty()||c.filter.bob||c.filter.ivtc.enabled||c.filter.yadif.enabled||c.sync!=SyncMode::vfr||
         c.filter.crop!=std::array<int,4>{}||c.filter.output_size.has_value()||c.filter.colorspace.tonemap.mode!=ToneMap::none;
     // Source interpretation overrides and changed color semantics invalidate old metadata.
     const auto& f=c.filter;

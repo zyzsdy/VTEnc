@@ -39,6 +39,7 @@ struct FieldFrames::Impl {
         }
         cadence.single_field = false;
         cadence.assembled_fields = true;
+        cadence.orphan_field = !paired;
         cadence.interlaced = paired;
         cadence.boundary |= boundary || !paired;
         if (!paired) cadence.pairing = FieldPairing::unspecified;

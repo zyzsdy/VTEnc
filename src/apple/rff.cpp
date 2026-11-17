@@ -43,7 +43,8 @@ struct RffFrames::Impl {
         auto pixel = gpu->synthesize(bottom, top, top, 0, 1, false);
         const auto duration = b ? CMTimeAdd(a.duration, b->duration) : a.duration;
         exact_rff(duration);
-        const FrameCadence cadence{true, true, 0, a.parity == 0 ? FieldOrder::tff : FieldOrder::bff, true, next_boundary || !b};
+        FrameCadence cadence{true, true, 0, a.parity == 0 ? FieldOrder::tff : FieldOrder::bff, true, next_boundary || !b};
+        cadence.orphan_field = !b;
         ready.push_back(std::make_unique<DecodedFrame>(DecodedFrame{std::move(pixel), a.pts, duration, cadence}));
         next_boundary = !b;
     }
@@ -68,7 +69,7 @@ struct RffFrames::Impl {
             if (current->cadence.repeat_fields || pending)
                 throw std::runtime_error("Final RFF picture has no duration; cannot infer its field interval from the previous coded picture");
             duration = previous_interval;
-            std::cerr << "vtenc: IVTC input omits final frame duration; using preceding PTS interval "
+            std::cerr << "vtenc: RFF input omits final frame duration; using preceding PTS interval "
                       << duration.value << '/' << duration.timescale << " seconds\n";
         }
         exact_rff(duration);

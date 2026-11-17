@@ -98,6 +98,7 @@ std::string configuration_json(const EncodeConfig& c, bool transcode) {
     s << '}';
     s << ",\"require_hardware_encoder\":true,\"frame_reordering\":false,\"realtime\":false,\"filter\":{\"requested\":" << f.requested
       << ",\"bob\":" << f.bob << ",\"field_order\":" << static_cast<int>(f.field_order)
+      << ",\"yadif\":{\"enabled\":" << f.yadif.enabled << ",\"bob\":" << f.yadif.bob << '}'
       << ",\"output_size\":";
     if (f.output_size) s << '[' << (*f.output_size)[0] << ',' << (*f.output_size)[1] << ']'; else s << "null";
     s << ",\"crop\":[" << f.crop[0] << ',' << f.crop[1] << ',' << f.crop[2] << ',' << f.crop[3] << ']'

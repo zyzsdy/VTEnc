@@ -6,6 +6,7 @@
 #include "gpu_filter.hpp"
 #include "bob.hpp"
 #include "ivtc.hpp"
+#include "yadif.hpp"
 #include "decoded_frames.hpp"
 #include "decode_policy.hpp"
 #include "ffmpeg_utils.hpp"
@@ -47,7 +48,7 @@ void validate_source(CMFormatDescriptionRef format, bool allow_interlaced, bool 
             throw std::runtime_error("Invalid video field count");
         }
         if (count != 1 && count != 2) throw std::runtime_error("Unsupported video field count");
-        if (count == 2 && !allow_interlaced) throw std::runtime_error("Interlaced video requires --deinterlace bob or --vpp-ivtc");
+        if (count == 2 && !allow_interlaced) throw std::runtime_error("Interlaced video requires --deinterlace bob, --vpp-ivtc or --vpp-yadif");
     }
     const auto transfer = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_TransferFunction);
     if (!colorspace && transfer && (CFEqual(transfer, kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ) ||
@@ -246,12 +247,13 @@ class ProcessedFrames final : public DecodedFrames {
 public:
     ProcessedFrames(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
         : input_(input), config_(std::move(config)), cancelled_(cancelled) {
-        validate_source(input.info().video_format, config_.filter.bob || config_.filter.ivtc.enabled, config_.filter.colorspace.enabled);
+        validate_source(input.info().video_format, config_.filter.bob || config_.filter.ivtc.enabled || config_.filter.yadif.enabled, config_.filter.colorspace.enabled);
         if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input, cancelled);
-        else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob || config_.filter.ivtc.enabled,
-            config_.filter.ivtc.enabled && (input.video_parameters()->codec_id == AV_CODEC_ID_HEVC ||
-                config_.filter.ivtc.expand != RffExpansion::off || config_.filter.ivtc.mixed));
+        else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob || config_.filter.ivtc.enabled || config_.filter.yadif.enabled,
+            config_.filter.yadif.enabled || (config_.filter.ivtc.enabled && (input.video_parameters()->codec_id == AV_CODEC_ID_HEVC ||
+                config_.filter.ivtc.expand != RffExpansion::off || config_.filter.ivtc.mixed)));
         if (config_.filter.ivtc.enabled) frames_ = std::make_unique<IvtcFrames>(std::move(frames_), input.info().video_format, config_.filter, cancelled);
+        if (config_.filter.yadif.enabled) frames_ = std::make_unique<YadifFrames>(std::move(frames_), input.info().video_format, config_.filter, cancelled);
         current_ = frames_->next();
         if (!current_) {
             if (!cancelled_) throw std::runtime_error("Input contains no displayable video frames");
@@ -260,9 +262,9 @@ public:
         auto pixel = current_->pixel.get();
         std::optional<CFRef<CMVideoFormatDescriptionRef>> assembled_format;
         auto source_format = input_.info().video_format;
-        if (config_.filter.ivtc.enabled) {
+        if (config_.filter.ivtc.enabled || config_.filter.yadif.enabled) {
             CMVideoFormatDescriptionRef raw = nullptr;
-            check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixel, &raw), "Describe IVTC display raster");
+            check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixel, &raw), "Describe deinterlaced display raster");
             assembled_format.emplace(raw);
             source_format = raw;
         }

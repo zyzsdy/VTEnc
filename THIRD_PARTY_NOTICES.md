@@ -28,7 +28,21 @@ VTEnc additionally protects clean P-to-N transitions, conservatively gates mixed
 cycle decimation, and retains exact source picture/cycle intervals rather than
 forcing a global CFR schedule.
 
-The following MIT license applies to both NVEnc adaptations above.
+## NVEnc YADIF algorithms
+
+`src/apple/shaders/yadif.metal`, `src/apple/yadif.cpp` and the scalar reference
+in `tests/yadif_hardware.cpp` adapt the directional spatial interpolation,
+temporal difference/clamp, first/second-field context and three-frame schedule
+from [NVEncFilterYadif.cu](https://github.com/rigaya/NVEnc/blob/5bb35d860bc5f877b01fe60e4de5ac756b9b80ed/NVEncCore/NVEncFilterYadif.cu),
+revision `5bb35d860bc5f877b01fe60e4de5ac756b9b80ed` (MIT, rigaya).
+The CUDA implementation is ported to Metal with independent U/V channels in
+NV12/P010 textures, integer 8/10-bit code values and explicit clamped borders.
+No CUDA runtime or FFmpeg YADIF code is included. VTEnc adds exact VFR timing,
+RFF/HEVC-field assembly, section-boundary protection and spatial-only orphan
+reconstruction. It does not implement IVTC decimation or claim bit identity
+with NVEnc's entire colorspace/16-bit processing pipeline.
+
+The following MIT license applies to the NVEnc adaptations above.
 
 The MIT License
 

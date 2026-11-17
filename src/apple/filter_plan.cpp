@@ -61,7 +61,7 @@ ColorPrimaries primaries_value(CFTypeRef value) {
 }
 
 bool needs_gpu_filter(const EncodeConfig& config, CVPixelBufferRef source) {
-    return !config.subtitles.empty() || config.filter.bob || config.filter.ivtc.enabled || config.filter.requested || describe(CVPixelBufferGetPixelFormatType(source)).depth != config.video.bit_depth;
+    return !config.subtitles.empty() || config.filter.bob || config.filter.ivtc.enabled || config.filter.yadif.enabled || config.filter.requested || describe(CVPixelBufferGetPixelFormatType(source)).depth != config.video.bit_depth;
 }
 
 FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef format, CVPixelBufferRef source) {
@@ -170,7 +170,7 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
         else if (value && CFEqual(value, kCVImageBufferChromaLocation_TopLeft)) bottom_chroma = ChromaLocation::top_left;
         else throw std::runtime_error("Missing or unsupported bottom-field chroma location; specify --input-chroma-loc");
     }
-    if (config.filter.bob || config.filter.ivtc.enabled) {
+    if (config.filter.bob || config.filter.ivtc.enabled || config.filter.yadif.enabled) {
         const int count = 1;
         CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &count));
         CFDictionarySetValue(attachments.get(), kCVImageBufferFieldCountKey, number.get());

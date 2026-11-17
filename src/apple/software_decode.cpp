@@ -64,7 +64,7 @@ struct SoftwareFrames::Impl {
     bool draining = false;
     bool ended = false;
     bool deinterlace;
-    bool ivtc;
+    bool temporal;
     bool packet_cadence = false;
     bool colorspace;
     FieldOrder field_order;
@@ -77,7 +77,7 @@ struct SoftwareFrames::Impl {
     OSType pixel_type = 0;
 
     Impl(ContainerInput& source, const FilterConfig& filter, const volatile std::sig_atomic_t& stop)
-        : input(source), deinterlace(filter.bob || filter.ivtc.enabled), ivtc(filter.ivtc.enabled), colorspace(filter.colorspace.enabled), field_order(filter.field_order), info(source.info()), cancelled(stop) {}
+        : input(source), deinterlace(filter.bob || filter.ivtc.enabled || filter.yadif.enabled), temporal(filter.ivtc.enabled || filter.yadif.enabled), colorspace(filter.colorspace.enabled), field_order(filter.field_order), info(source.info()), cancelled(stop) {}
     ~Impl() {
         av_frame_free(&frame);
         avcodec_free_context(&decoder);
@@ -128,8 +128,8 @@ struct SoftwareFrames::Impl {
             attach(kCVImageBufferChromaLocationTopFieldKey, chroma);
             attach(kCVImageBufferChromaLocationBottomFieldKey, chroma);
         }
-        // Bob and IVTC interpret every raster as a field pair. Hard telecine can mix
-        // progressive-coded and interlaced-coded frames in that same track.
+        // Field filters may explicitly interpret progressive-coded rasters as field
+        // pairs. The independent per-picture cadence preserves original flags.
         const int fields = deinterlace || (frame->flags & AV_FRAME_FLAG_INTERLACED) ? 2 : 1;
         CFRef count(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &fields));
         attach(kCVImageBufferFieldCountKey, count.get());
@@ -168,7 +168,7 @@ struct SoftwareFrames::Impl {
             throw std::runtime_error("HDR requires --vpp-colorspace; Dolby Vision input is not supported");
         }
         if ((frame->flags & AV_FRAME_FLAG_INTERLACED) && !deinterlace) {
-            throw std::runtime_error("Interlaced video requires --deinterlace bob or --vpp-ivtc");
+            throw std::runtime_error("Interlaced video requires --deinterlace bob, --vpp-ivtc or --vpp-yadif");
         }
         const auto dimensions = CMVideoFormatDescriptionGetDimensions(info.video_format);
         if (frame->width <= 0 || frame->height <= 0 || frame->width % 2 || frame->height % 2 ||
@@ -195,7 +195,7 @@ struct SoftwareFrames::Impl {
         }
         // RFF lookahead and a pending repeated field may retain extra sources.
         // CFR retains the current picture and one lookahead after processing.
-        const int limit = ivtc ? 10 : 5;
+        const int limit = temporal ? 10 : 5;
         CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &limit));
         const void* keys[] = {kCVPixelBufferPoolAllocationThresholdKey};
         const void* values[] = {number.get()};
@@ -253,7 +253,7 @@ struct SoftwareFrames::Impl {
         check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, raw, &description), "Describe software decoded frame");
         CFRef current(description);
         if (!frame_format) frame_format.emplace(std::move(current));
-        else if (!ivtc && !CMFormatDescriptionEqual(current.get(), frame_format->get())) {
+        else if (!temporal && !CMFormatDescriptionEqual(current.get(), frame_format->get())) {
             throw std::runtime_error("Software decoded video metadata changed mid-stream at PTS=" + std::to_string(frame->pts));
         }
         return pixel;
@@ -270,7 +270,7 @@ SoftwareFrames::SoftwareFrames(const EncodeConfig& config, ContainerInput& input
     if (!s.decoder) throw std::bad_alloc();
     s.check(avcodec_parameters_to_context(s.decoder, parameters), "avcodec_parameters_to_context");
     s.decoder->pkt_timebase = input.video_time_base();
-    s.packet_cadence = parameters->codec_id == AV_CODEC_ID_HEVC && config.filter.ivtc.enabled;
+    s.packet_cadence = parameters->codec_id == AV_CODEC_ID_HEVC && (config.filter.ivtc.enabled || config.filter.yadif.enabled);
     // Carry metadata with its picture through frame threading and B-frame
     // reordering; packet order and a PTS lookup are not frame ownership.
     if (s.packet_cadence) s.decoder->flags |= AV_CODEC_FLAG_COPY_OPAQUE;

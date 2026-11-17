@@ -4,6 +4,7 @@
 #include "encoder_session.hpp"
 #include "bob.hpp"
 #include "ivtc.hpp"
+#include "yadif.hpp"
 #include "timeline.hpp"
 #include "aac_edit.hpp"
 extern "C" {
@@ -200,7 +201,7 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
     s.mux->avoid_negative_ts = AVFMT_AVOID_NEG_TS_DISABLED;
     s.video = avformat_new_stream(s.mux, nullptr);
     if (!s.video) throw std::bad_alloc();
-    const int filter_scale = config.filter.bob ? bob_timescale(info.video_timescale) :
+    const int filter_scale = config.filter.yadif.enabled ? yadif_output_timescale(info.video_timescale, config.filter.yadif.bob) : config.filter.bob ? bob_timescale(info.video_timescale) :
         (config.filter.ivtc.enabled ? ivtc_output_timescale(info.video_timescale, config.filter.ivtc) : info.video_timescale);
     const int scale = config.sync == SyncMode::vfr ? filter_scale : timeline_timescale(filter_scale, config.fps_num);
     s.video->time_base = {1, scale};

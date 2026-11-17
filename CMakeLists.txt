@@ -46,12 +46,13 @@ target_include_directories(vtenc_core PUBLIC include)
 target_link_libraries(vtenc_core PRIVATE vtenc_options)
 
 # Embed source so installed CLI needs neither shader files nor the offline Metal compiler.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/apple/shaders/filter.metal src/apple/shaders/colorspace.metal src/apple/shaders/ivtc.metal src/apple/shaders/subtitle.metal)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/apple/shaders/filter.metal src/apple/shaders/colorspace.metal src/apple/shaders/ivtc.metal src/apple/shaders/subtitle.metal src/apple/shaders/yadif.metal)
 file(READ src/apple/shaders/filter.metal VTENC_GPU_SHADER)
 file(READ src/apple/shaders/colorspace.metal VTENC_COLOR_SHADER)
 file(READ src/apple/shaders/ivtc.metal VTENC_IVTC_SHADER)
 file(READ src/apple/shaders/subtitle.metal VTENC_SUBTITLE_SHADER)
-string(APPEND VTENC_GPU_SHADER "\n${VTENC_IVTC_SHADER}\n${VTENC_SUBTITLE_SHADER}")
+file(READ src/apple/shaders/yadif.metal VTENC_YADIF_SHADER)
+string(APPEND VTENC_GPU_SHADER "\n${VTENC_IVTC_SHADER}\n${VTENC_SUBTITLE_SHADER}\n${VTENC_YADIF_SHADER}")
 string(PREPEND VTENC_GPU_SHADER "${VTENC_COLOR_SHADER}\n")
 configure_file(src/apple/shaders/filter_shader.hpp.in generated/filter_shader.hpp @ONLY)
 
@@ -66,6 +67,8 @@ add_library(vtenc_apple STATIC
     src/apple/software_decode.cpp
     src/apple/filter_plan.cpp
     src/apple/bob.cpp
+    src/apple/yadif.cpp
+    src/apple/yadif.mm
     src/apple/ivtc.cpp
     src/apple/rff.cpp
     src/apple/field_frames.cpp
@@ -130,6 +133,14 @@ if(BUILD_TESTING)
     add_executable(vtenc_gpu_filter_test tests/gpu_filter_hardware.cpp)
     target_include_directories(vtenc_gpu_filter_test PRIVATE src/apple)
     target_link_libraries(vtenc_gpu_filter_test PRIVATE vtenc_apple vtenc_options)
+    add_executable(vtenc_yadif_config_test tests/yadif_config_test.cpp)
+    target_include_directories(vtenc_yadif_config_test PRIVATE src/apple)
+    target_link_libraries(vtenc_yadif_config_test PRIVATE vtenc_apple vtenc_options)
+    add_test(NAME vtenc.yadif-config COMMAND vtenc_yadif_config_test)
+    set_tests_properties(vtenc.yadif-config PROPERTIES LABELS "timeline" TIMEOUT 15)
+    add_executable(vtenc_yadif_test tests/yadif_hardware.cpp)
+    target_include_directories(vtenc_yadif_test PRIVATE src/apple)
+    target_link_libraries(vtenc_yadif_test PRIVATE vtenc_apple vtenc_options)
     add_executable(vtenc_ivtc_test tests/ivtc_hardware.cpp)
     target_include_directories(vtenc_ivtc_test PRIVATE src/apple)
     target_link_libraries(vtenc_ivtc_test PRIVATE vtenc_apple vtenc_options)

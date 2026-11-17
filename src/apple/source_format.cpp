@@ -130,7 +130,7 @@ OSType source_pixel_format(CMFormatDescriptionRef format, bool allow_interlaced,
         if ((config[2] & 0x1c) != 0x0c) throw std::runtime_error("P2 requires 4:2:0 video chroma");
         depth = (config[2] & 0x40) ? ((config[2] & 0x20) ? 12 : 10) : 8;
     } else throw std::runtime_error("Unsupported source codec");
-    if ((field_coding || display_fields) && !allow_interlaced) throw std::runtime_error("Interlaced video requires --deinterlace bob or --vpp-ivtc");
+    if ((field_coding || display_fields) && !allow_interlaced) throw std::runtime_error("Interlaced video requires --deinterlace bob, --vpp-ivtc or --vpp-yadif");
     if (interlaced_coding) *interlaced_coding = field_coding;
     const auto range = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FullRangeVideo);
     const bool full = range && CFEqual(range, kCFBooleanTrue);

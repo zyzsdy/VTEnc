@@ -99,7 +99,7 @@ inline void configure_hardware_encoder(VTCompressionSessionRef session, const En
     set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, "AllowFrameReordering");
     set(kVTCompressionPropertyKey_RealTime, kCFBooleanFalse, "RealTime");
     set_integer(kVTCompressionPropertyKey_MaxKeyFrameInterval, config.gop, "MaxKeyFrameInterval");
-    if (config.filter.bob) set_integer(kVTCompressionPropertyKey_FieldCount, 1, "FieldCount [Bob progressive output]");
+    if (config.filter.bob || config.filter.yadif.enabled) set_integer(kVTCompressionPropertyKey_FieldCount, 1, "FieldCount [deinterlaced progressive output]");
     if (!source_format || config.sync != SyncMode::vfr) {
         // Floating point is only an encoder rate hint. All submitted times use CMTime integers.
         const double fps = static_cast<double>(config.fps_num) / config.fps_den;

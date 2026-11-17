@@ -19,6 +19,7 @@
 - 外部 ASS/SSA 字幕：libass 排版／字形掩码、Metal 线性光合成与缓存、中文字体、偏移／透明度／裁剪／多层、SDR 8/10-bit 与 PQ/HLG。独立颜色标签及 HDR10 静态元数据策略见 P6。
 - Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709/BT.2020 NCL/SMPTE 240M 矩阵转换，以及 `--vpp-colorspace` 线性光色域、传递函数转换，以及 Hable / Mobius / Reinhard / BT.2390 HDR→SDR tone mapping。
 - Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010、硬解或软解的文件输入。两个原始交错样片在本机无法硬解，可用软解接入 Metal Bob。
+- P7 Metal YADIF 运动自适应反交错：单倍／场倍、TFF/BFF、逐行混合、RFF 与 HEVC 单场配对，保留精确时间轴；与 Bob、IVTC 互斥。
 - P4 `--json-status` 版本化 JSON Lines 能力、进度与终态协议，或普通终端实时进度；编码日志统一 stderr，stdout 可独占码流。
 - avformat 自动识别 Y4M 文件/stdin；显式 `--avsw` 接收 planar 4:2:0 8/10-bit，严格校验颜色解释、帧率、截断和 EOF。
 - P5 显式 CFR／forcecfr、旋转后 DAR 标签覆盖，以及原生 AudioToolbox AAC-LC 转码；采样率、声道和封装边界见下文。
@@ -203,7 +204,7 @@ FFmpeg 来自外部安装，本仓库没有复制其上游实现。FFmpeg 的基
 
 视频 PTS 使用整数有理数传递，相邻 PTS 决定显示时长。TS 等容器可能没有末帧 duration：此时明确打印诊断并沿用前一个显示间隔；只有一帧且无 duration 时仍报错。音视频的输入时钟未必能精确映射到封装器选定的输出时钟（例如 MKV 常用 1/1000，TS 使用 1/90000）；写入时采用整数有理数就近舍入，误差不超过半个输出刻度，并首次打印换算诊断。可精确表示时不舍入；输出时钟若把不同视频帧的 PTS 或有效时长压成同一刻度，直接报错。封装器最终可保存的时长、旋转与边信息取决于格式；裸码流没有容器级时间戳。源音频 PTS 不递增、损坏包、流参数变化或目标封装失败均直接退出。
 
-当前限定一个视频轨；HDR 输入必须显式指定 `--vpp-colorspace`，交错输入必须显式启用 Bob。支持位深、尺寸和色彩空间转换；不支持 Dolby Vision、多音轨选择、软字幕透传、章节与附件；外部 ASS/SSA 烧录见 P6。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
+当前限定一个视频轨；HDR 输入必须显式指定 `--vpp-colorspace`，交错输入必须显式启用 Bob、IVTC 或 YADIF。支持位深、尺寸和色彩空间转换；不支持 Dolby Vision、多音轨选择、软字幕透传、章节与附件；外部 ASS/SSA 烧录见 P6。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
 
 本地文件任务取消或运行错误不发布成品，临时目录自动清理；成功写完 trailer、检查写入错误并关闭文件后，以不覆盖既有文件的方式发布。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
 
@@ -264,7 +265,7 @@ python3 tests/filter_hardware.py --vtenc build/dev/vtenc
 
 GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理路径不锁定或复制 CPU 像素，无 CPU 滤镜回退。每帧等待 Metal 命令成功完成后提交硬编，保留原 PTS / duration，输出缓冲池最多 3 个。任务结果中的 `Metal GPU frames completed` 统计成功提交硬编的已完成 GPU 帧；无需滤镜且位深相同时为 0。
 
-当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持物理旋转、Bicubic/Lanczos、字幕合成和运动自适应反交错。这些仍属于后续工作。
+当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持物理旋转、Bicubic/Lanczos；字幕合成见 P6，运动自适应反交错见 P7。
 
 2026-11-17 已在本机完成 240 组 GPU 逐像素参考比对、`video_samples` 的 11 个成功转码用例和 6 个拒绝用例，以及 P2 回归；详见 [P3 验证记录](docs/P3验证.md)。结果不代表其他硬件、系统或任意尺寸已验证，也不承诺零拷贝或长期吞吐量。
 
@@ -401,6 +402,43 @@ Metal 使用 RGBA32Float 缓存预乘线性光字幕图层，仅 libass 报告�
 
 本机验收与限制见 [P6 验证](docs/P6验证.md)。这不是 NVEnc `--vpp-subburn` 全参数兼容，也不代表所有 Apple Silicon 或旧 macOS 已验证。
 
+## P7：Metal YADIF 运动自适应反交错
+
+```bash
+# 自动逐帧识别场结构；每个显示场对输出一帧
+./build/dev/vtenc --avsw -i interlaced.mp4 -o build/yadif.mov --vpp-yadif
+# 场倍输出：30000/1001 场对/s -> 60000/1001p，保留两场的运动时刻
+./build/dev/vtenc -i interlaced.mp4 -o build/yadif60.mov --vpp-yadif mode=bob
+# 将逐行编码的交错栅格显式解释为 BFF
+./build/dev/vtenc -i woven.mp4 -o build/yadif-bff.mov --vpp-yadif mode=bob_bff
+```
+
+`--vpp-yadif [mode=auto|tff|bff|bob|bob_tff|bob_bff]` 参考 NVEnc 的 MIT 许可 YADIF 实现。Metal 在三帧窗口内做方向插值与时间差约束；静止区域保留细节，运动区域重建缺失行。Y、U、V 分别处理，生产路径没有 CPU 滤镜或软件视频编码回退。源代码、固定上游版本与许可证见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+
+| mode | 输出数量 | 场解释 |
+| --- | --- | --- |
+| `auto`（默认） | 每显示场对一帧 | 逐帧元数据；逐行画面保留，交错画面保留先到场、重建后到场 |
+| `tff` / `bff` | 每显示场对一帧 | 强制先到场为上场／下场 |
+| `bob` | 每显示场对两帧 | 逐帧元数据；逐行画面复制为两个半帧区间 |
+| `bob_tff` / `bob_bff` | 每显示场对两帧 | 强制 TFF／BFF，按场时间先后输出 |
+
+`--field-order tff|bff` 可覆盖 `auto` / `bob` 的源解释；与显式模式场序冲突时报错。自动模式不猜测缺失的场结构或场序。三个反交错入口 `--deinterlace bob`、`--vpp-ivtc`、`--vpp-yadif` 互斥。
+
+顺序为 HEVC 单场配对 → RFF 展开 → YADIF → 裁剪／缩放／色彩转换 → CFR（若启用）→ 字幕 → 硬件编码。原始 RFF 场序与 HEVC 空间奇偶优先于全局场序覆盖；YADIF 不做电影 cadence 去重。孤立场只输出一帧并保留其自身区间，缺失行只做空间重建；缺少末场 duration 时明确报错。常规首尾缺邻帧时复制当前帧作时间参考；结构边界、逐行／交错切换、场序变化不跨界借帧。
+
+保留源 VFR、非零 PTS 起点和总时长；场倍严格二等分每个显示场对区间，不先换算成浮点 FPS。`--avsync` 可随后显式转换输出频率。第一音轨复制和字幕都沿用同一输出时间轴。
+
+输入走 avformat（含显式 `--avsw` 的 Y4M 文件／stdin），仅支持 NV12/P010 8/10-bit 4:2:0、偶数宽、完整帧高度至少 8 且为 4 的倍数。紧密打包 raw／synthetic 入口不接受 YADIF，可改用带时钟与场标志的 Y4M；其颜色解释仍必须显式提供，见 P4。YADIF 按各平面原采样网格处理，要求上下场色度位置相同；后续 Metal 色彩／几何阶段统一输出 left。它不采用 Bob 的独立场色度相位重采样，不能声称与 Bob、FFmpeg YADIF 或 NVEnc 全处理链逐像素等价。
+
+实现和验证见 [P7 验证](docs/P7验证.md)。GPU 用例仅显式执行，不进入默认 CTest：
+
+```bash
+ctest --preset dev -R '^vtenc.cli$'
+ctest --preset dev -R '^vtenc.yadif-config$'
+./build/dev/vtenc_yadif_test
+python3 tests/yadif_hardware.py
+```
+
 ## P3 Bob 反交错
 
 `--deinterlace bob` 对每个输入帧对的两个场分别进行垂直线性重建，按时间先后输出完整尺寸的逐行帧。Y 与 UV 都只从所选场取样；色度位置按各场坐标解释，再转换为逐行 left 色度位置。Bob 可与文件模式的裁剪、缩放和色彩转换组合；源高度和上下裁剪边距必须为 4 的倍数，以保留完整的 4:2:0 场布局。
@@ -431,7 +469,7 @@ Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/
 
 ## Metal IVTC：soft / hard telecine 还原
 
-`--vpp-ivtc` 在 Metal 上展开 soft telecine 的 RFF 重复场、匹配相邻帧的上下场并去重，将典型的 30000/1001 hard telecine 还原为 24000/1001 逐行输出。软硬 telecine 与普通逐行视频混合时使用 `mixed=true`，按重复证据决定是否降帧，输出可以是 VFR。普通 60i 的完整场运动恢复仍使用 Bob；IVTC 的混合模式仅在源帧率上修复真正交错片段。
+`--vpp-ivtc` 在 Metal 上展开 soft telecine 的 RFF 重复场、匹配相邻帧的上下场并去重，将典型的 30000/1001 hard telecine 还原为 24000/1001 逐行输出。软硬 telecine 与普通逐行视频混合时使用 `mixed=true`，按重复证据决定是否降帧，输出可以是 VFR。普通 60i 的完整场运动恢复使用 Bob 或场倍 YADIF；IVTC 的混合模式仅在源帧率上修复真正交错片段。
 
 ```bash
 ./build/dev/vtenc -i telecine.mp4 -o build/film.mp4 \

@@ -16,5 +16,6 @@ struct FrameCadence {
     FieldPairing pairing = FieldPairing::unspecified;
     bool duplicate = false; // Already coded/displayed, never an extra RFF interval.
     bool assembled_fields = false; // Spatial parity comes from the bitstream.
+    bool orphan_field = false; // One field interval, never split into two exposures.
 };
 }

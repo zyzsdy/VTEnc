@@ -81,6 +81,7 @@ std::string_view codec_name(Codec codec) {
 
 CommandLine parse_command_line(std::span<const std::string_view> args) {
     CommandLine result;
+    std::optional<FieldOrder> yadif_order;
     bool has_command = false;
     bool encode_options = false;
     bool synthetic = false;
@@ -115,6 +116,21 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (arg == "--audio-copy" || arg == "--no-audio") {
             result.encode.copy_audio = arg == "--audio-copy";
             encode_options = true;
+            continue;
+        }
+        if (arg == "--vpp-yadif") {
+            result.encode.filter.yadif.enabled = true;
+            encode_options = true;
+            if (i + 1 < args.size() && !args[i + 1].starts_with("-")) {
+                const auto params = args[++i];
+                if (!params.starts_with("mode=")) throw std::invalid_argument("--vpp-yadif requires mode=auto|tff|bff|bob|bob_tff|bob_bff");
+                const auto mode = params.substr(5);
+                if (mode != "auto" && mode != "tff" && mode != "bff" && mode != "bob" && mode != "bob_tff" && mode != "bob_bff")
+                    throw std::invalid_argument("Invalid --vpp-yadif mode; use auto, tff, bff, bob, bob_tff or bob_bff");
+                result.encode.filter.yadif.bob = mode.starts_with("bob");
+                if (mode.ends_with("tff")) yadif_order = FieldOrder::tff;
+                if (mode.ends_with("bff")) yadif_order = FieldOrder::bff;
+            }
             continue;
         }
         if (arg == "--vpp-ivtc") {
@@ -290,10 +306,18 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
     if (seen.contains("--avhw") && seen.contains("--avsw")) {
         throw std::invalid_argument("--avhw and --avsw are mutually exclusive");
     }
+    if (yadif_order) {
+        if (seen.contains("--field-order") && result.encode.filter.field_order != FieldOrder::automatic &&
+            result.encode.filter.field_order != *yadif_order)
+            throw std::invalid_argument("--vpp-yadif mode conflicts with --field-order");
+        result.encode.filter.field_order = *yadif_order;
+    }
+    if (result.encode.filter.yadif.enabled && (result.encode.filter.bob || result.encode.filter.ivtc.enabled))
+        throw std::invalid_argument("--vpp-yadif, --vpp-ivtc and --deinterlace bob are mutually exclusive");
     if (result.encode.filter.ivtc.enabled && result.encode.filter.bob)
         throw std::invalid_argument("--vpp-ivtc and --deinterlace bob are mutually exclusive");
-    if (seen.contains("--field-order") && !result.encode.filter.bob && !result.encode.filter.ivtc.enabled) {
-        throw std::invalid_argument("--field-order requires --deinterlace bob or --vpp-ivtc");
+    if (seen.contains("--field-order") && !result.encode.filter.bob && !result.encode.filter.ivtc.enabled && !result.encode.filter.yadif.enabled) {
+        throw std::invalid_argument("--field-order requires --deinterlace bob, --vpp-ivtc or --vpp-yadif");
     }
     if (static_cast<int>(seen.contains("--audio-copy")) + static_cast<int>(seen.contains("--no-audio")) +
         static_cast<int>(seen.contains("--audio-codec")) > 1)
@@ -331,6 +355,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             if (seen.contains("--avhw") || seen.contains("--avsw")) {
                 throw std::invalid_argument("--avhw and --avsw require compressed input (without --input-res)");
             }
+            if (result.encode.filter.yadif.enabled) throw std::invalid_argument("--vpp-yadif requires avformat input; use Y4M with --avsw for raw samples");
             if (result.encode.filter.ivtc.enabled) throw std::invalid_argument("--vpp-ivtc requires compressed input");
             if (!result.encode.subtitles.empty() || result.encode.color_tags.enabled || seen.contains("--hdr-metadata") || result.encode.hdr.mastering || result.encode.hdr.light)
                 throw std::invalid_argument("Subtitle and output metadata options require avformat input (Y4M with --avsw is supported)");
@@ -387,7 +412,7 @@ Usage:
         [--color-tags matrix=NAME,transfer=NAME,colorprim=NAME]
         [--hdr-metadata auto|clear|preserve] [--master-display INTEGER_LIST]
         [--max-cll MaxCLL,MaxFALL]
-        [--deinterlace bob | --vpp-ivtc [PARAMS]] [--field-order auto|tff|bff]
+        [--deinterlace bob | --vpp-ivtc [PARAMS] | --vpp-yadif [mode=MODE]] [--field-order auto|tff|bff]
         [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
         --frames COUNT [-f FORMAT | --output-format FORMAT] [--codec h264|hevc] [--output-depth 8|10]
@@ -522,7 +547,17 @@ own intervals; a missing final field duration is an error. Crop/resize uses the
 assembled full-height raster. Missing required timing, reserved/contradictory
 pic_struct and multilayer HEVC fail explicitly.
 Raw IVTC input, cadence lock and other NVEnc IVTC parameters are unsupported.
-Interlaced input requires explicit --vpp-ivtc or --deinterlace bob. Bob produces
+--vpp-yadif [mode=auto|tff|bff|bob|bob_tff|bob_bff] performs Metal YADIF before
+crop/resize/colorspace/subtitles. Default auto preserves progressive pictures and
+reconstructs the second field of interlaced pictures. bob emits two frames per
+raster (duplicates progressive pictures); tff/bff force field interpretation.
+--field-order can force auto/bob modes; contradictory explicit orders fail.
+RFF and HEVC single fields are assembled first, without cadence decimation.
+Orphan field intervals produce one output. PTS/duration remain exact, including
+VFR and nonzero origins. Auto requires known picture structure/field order.
+Requires avformat input (including Y4M with --avsw), NV12/P010, height >= 8
+and divisible by four, and equal top/bottom chroma locations. No CPU fallback.
+Interlaced input requires --vpp-yadif, --vpp-ivtc or --deinterlace bob. Bob produces
 two Metal outputs per input. Auto field order requires unambiguous metadata; tff/bff overrides it.
 Bob requires height and vertical crop margins divisible by four, keeps telecine
 repeated fields, and is not inverse telecine. Software decoding accepts 8/10-bit

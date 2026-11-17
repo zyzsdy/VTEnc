@@ -60,7 +60,13 @@ struct IvtcConfig {
     int post = 2, nt = 10, cthresh = 4, combpel = 8, dthresh = 7;
 };
 
+struct YadifConfig {
+    bool enabled = false;
+    bool bob = false; // One output per field instead of per display raster.
+};
+
 struct FilterConfig {
+    YadifConfig yadif;
     IvtcConfig ivtc;
     bool bob = false;
     FieldOrder field_order = FieldOrder::automatic;

@@ -365,7 +365,7 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
         if (p->chroma_location == AVCHROMA_LOC_UNSPECIFIED && f.input_chroma == ChromaLocation::automatic)
             throw std::runtime_error("Y4M missing chroma location; specify --input-chroma-loc left|center|top-left");
     }
-    s.require_cadence = config.filter.ivtc.enabled;
+    s.require_cadence = config.filter.ivtc.enabled || config.filter.yadif.enabled;
     s.info.video_timescale = stream->time_base.den;
     const auto start = stream->start_time == AV_NOPTS_VALUE ? kCMTimeInvalid : media_time(stream->start_time, stream->time_base, "video start");
     const auto duration = (s.y4m || stream->duration == AV_NOPTS_VALUE) ? kCMTimeInvalid : media_time(stream->duration, stream->time_base, "video duration");
