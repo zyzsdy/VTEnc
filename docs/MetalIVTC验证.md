@@ -25,6 +25,8 @@ ctest --preset dev -R '^vtenc.timeline$'
 ./build/dev/vtenc_gpu_filter_test
 python3 tests/ivtc_hardware.py --vtenc build/dev/vtenc
 python3 tests/rff_hardware.py --vtenc build/dev/vtenc
+ctest --preset dev -R '^vtenc.hevc-cadence$'
+python3 tests/hevc_rff_hardware.py --vtenc build/dev/vtenc
 ```
 
 本机 CMake 位于 `build/tools/bin`；运行 Python 硬件脚本时将 `/opt/homebrew/bin` 加入 PATH。
@@ -85,8 +87,32 @@ BFF 10-bit 用例使用逐行编码但内部包含交织场的 HEVC 载体，显
 - 混合夹具：5 个逐行图片＋8 个 soft 图片＋10 个 hard 栅格＋5 个逐行图片。28 个编码图片展开为 30 个显示帧，输出 26 个依次连续的已知电影/视频图片；逐行段保持 30000/1001，电影段为 24000/1001。
 - 纯 soft：8→10→8，使用 `--field-order auto`；`expand=off,mixed=true` 则 8→8，保留原始 3/2 场变时长而非重新分配为 CFR。
 - 所有用例逐包核对 PTS/duration、0.2 秒起点及片尾；混合用例的 119 个 AAC 包按 SHA-256、PTS、duration 完全相同。每帧独立解码像素与已知参考相同（报告用 100 表示零 MSE，不将它当作有限 PSNR 测量）。这只验证当前结构化夹具，不代表任意压缩影片无损还原。
-- 单独生成带 HEVC `pic_struct=5` 的硬编载体，验证 `--avhw`、`--avsw`、自动三种路径均报告不支持的元数据并清理输出，而非静默把重复场当成普通逐行帧。
+- 上一阶段曾以 HEVC `pic_struct=5` 验证显式拒绝路径；本次已由下面的 HEVC 正向解析与错误输入测试替代，不再拒绝合法 HEVC RFF。
 
 修复了纯 soft H.264 的显示场标记被当作交错编码能力的问题：现在以 SPS `frame_mbs_only_flag` 决定是否请求 VideoToolbox `BothFields`。此前纯 soft 用例报 `OSStatus=-12900`；修复后强制硬解、Metal、硬编完整码流均通过。
 
-HEVC RFF 的边界来自 [FFmpeg HEVC SEI 解析](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/hevc/sei.c)：其公开帧/解析器路径不保留 3:2 `pic_struct=5/6`。本实现对 picture-timing SEI 保守拒绝；已知纯 hard telecine 可显式 `expand=off,mixed=false` 跳过此元数据需求，不能用它宣称 HEVC soft telecine 得到恢复。
+## HEVC picture-timing 与重排验证
+
+HEVC 新增独立 C++20 元数据解析器 `src/apple/hevc_cadence.cpp`，按 [ITU-T H.265](https://www.itu.int/rec/T-REC-H.265) 的 SPS/VUI 与 Annex D picture-timing 语法实现，不使用 FFmpeg 私有 ABI，也不引入软件视频编码。当前 [FFmpeg HEVC SEI 解析](https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/hevc/sei.c) 不保留 3:2 `pic_struct=5/6`，因此硬解与软解共同使用此解析结果。
+
+- hvcC 的 1/2/3/4 字节 NAL 长度和 Annex B 均支持；处理防竞争字节、多个 SEI、扩展 payload type/size、子层 PTL、scaling list、显式/预测 RPS、长参考及 VUI 可选项。
+- 每个完整 access unit 从 slice 的 PPS ID 定位 SPS，支持带内参数集更新、多个 PPS/SPS 和多 slice；不沿用前一图片的 SEI。VUI 缺失时按 PTL 推导 `frame_field_info_present_flag`。
+- `pic_struct=0/3/4` 不增加场，5/6 增加一场并分别使用 TFF/BFF，7/8 增加 2/4 场。`source_scan_type` 参与源扫描类型判断；`duplicate_flag` 不等于 RFF，不增加显示场。HRD 延迟语法位于这些字段之后；本实现只读取 cadence，不使用 HRD 改写容器时间戳。
+- 软解用 `AV_CODEC_FLAG_COPY_OPAQUE` 将每个包的解析结果传给对应解码帧，跨 frame threading 和 B 帧重排；没有对应标记时直接失败。原生路径在显示队列排序前绑定标记。VideoToolbox `BothFields` 根据 SPS 的 `field_seq_flag` 设置，不把 soft telecine 的显示场当作编码场。
+- 多层 NAL、独立单场图片/`field_seq_flag=1`、保留枚举、截断或缺失必需 SEI 明确拒绝。目标仍是完整帧栅格的 soft/hard telecine，不宣称支持独立场图片拼接。完整 slice/HRD 码流一致性由解码器负责。
+
+`vtenc.hevc-cadence`：111 个解析/错误用例通过；覆盖以上语法分支、参数集切换、HRD 数据不误读为 `pic_struct`、跨 access unit 的 SEI 清空和非法输入拒绝。
+
+`tests/hevc_rff_hardware.py` 报告：`build/hardware-tests/hevc-rff-ned_zlp8/report.json`。
+
+| 用例 | 覆盖与结果 |
+| --- | --- |
+| Main/Main10 × TFF/BFF × soft/mixed × 硬解/软解 | 24 个输出；混合 28→30→26，纯 soft 8→10→8；关闭展开时 8→8 保留原图片区间 |
+| MPEG-TS Annex B × 8/10-bit × 硬解/软解 | 4 个视频输出；整数时间轴按 TS 原始包时长验证，不假定 90 kHz 能精确表示每个 RFF 场 |
+| 含 B 帧的真实 HEVC 8/10-bit 样片 × 硬解/软解 | 4 个输出，各 82 帧；测试 remux 工具按显示 PTS 插入不同 RFF 标记，不改变 slice 字节、不重新编码；逐个显示帧核对 RFF 标记以及输出 PTS/duration |
+| RFF 结尾的 1/3 图片 × 8/10-bit × 硬解/软解 | 8 个输出；最后图片时长及剩余单场区间精确保留，单场 EOF 有诊断 |
+| 缺失必需 SEI/保留 pic_struct × 强制硬解/软解/自动 | 6 个明确失败；无成品，不触发软件解码重试 |
+
+共 40 个成功输出和 6 个错误路径检查。视频始终硬件编码，所有强制硬解用例确认实际硬件解码。结构化夹具逐帧比较已知参考，最低 PSNR 为 56.01 dB；MP4 混合用例逐包保留 119 个 AAC payload、PTS、duration。Annex B 用例只测视频，避免把 TS ADTS→MP4 AAC 的正常封装转换误报为 payload 改变。B 帧用例使用 `expand=off,cycle=0` 单独验证重排后的元数据对应，RFF 展开与混合去重由其他正向用例验证。
+
+本次亦重跑 H.264 RFF 的 12 个成功输出；原有 hard-IVTC 像素核心未修改，不据此重复全量 GPU/CTest。

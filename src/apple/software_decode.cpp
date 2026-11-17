@@ -64,6 +64,7 @@ struct SoftwareFrames::Impl {
     bool ended = false;
     bool deinterlace;
     bool ivtc;
+    bool packet_cadence = false;
     bool colorspace;
     FieldOrder field_order;
     const MediaInfo& info;
@@ -265,6 +266,11 @@ SoftwareFrames::SoftwareFrames(const EncodeConfig& config, ContainerInput& input
     if (!s.decoder) throw std::bad_alloc();
     s.check(avcodec_parameters_to_context(s.decoder, parameters), "avcodec_parameters_to_context");
     s.decoder->pkt_timebase = input.video_time_base();
+    s.packet_cadence = parameters->codec_id == AV_CODEC_ID_HEVC && config.filter.ivtc.enabled &&
+        (config.filter.ivtc.expand != RffExpansion::off || config.filter.ivtc.mixed);
+    // Carry metadata with its picture through frame threading and B-frame
+    // reordering; packet order and a PTS lookup are not frame ownership.
+    if (s.packet_cadence) s.decoder->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
     s.decoder->get_format = &software_format;
     s.decoder->thread_count = 2; // Bounded frame threading, independent of host core count.
     s.decoder->err_recognition = AV_EF_CRCCHECK | AV_EF_BITSTREAM | AV_EF_BUFFER | AV_EF_EXPLODE;
@@ -294,18 +300,32 @@ std::unique_ptr<DecodedFrame> SoftwareFrames::next() {
             // The scheduler derives all but the final duration from adjacent PTS.
             // A missing final duration is rejected there, never guessed from FPS.
             auto pixel = s.pixels();
-            const FrameCadence cadence{true, (s.frame->flags & AV_FRAME_FLAG_INTERLACED) != 0,
+            FrameCadence cadence{true, (s.frame->flags & AV_FRAME_FLAG_INTERLACED) != 0,
                 s.frame->repeat_pict, (s.frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) ? FieldOrder::tff : FieldOrder::bff};
+            if (s.packet_cadence) {
+                if (!s.frame->opaque_ref || s.frame->opaque_ref->size != sizeof(FrameCadence))
+                    throw std::runtime_error("HEVC decoder did not preserve per-picture cadence metadata");
+                std::memcpy(&cadence, s.frame->opaque_ref->data, sizeof(cadence));
+                if (!cadence.known) throw std::runtime_error("Missing parsed HEVC frame cadence");
+            }
             return std::make_unique<DecodedFrame>(DecodedFrame{std::move(pixel), pts, duration, cadence});
         }
         s.check(result == AVERROR(EAGAIN) ? 0 : result, "avcodec_receive_frame [software]");
         if (s.draining) throw std::runtime_error("FFmpeg requested more input after decoder drain");
-        auto packet = s.input.read_video_packet();
+        FrameCadence cadence;
+        auto packet = s.input.read_video_packet(s.packet_cadence ? &cadence : nullptr);
         if (!packet) {
             s.check(avcodec_send_packet(s.decoder, nullptr), "avcodec_send_packet [drain]");
             s.draining = true;
         } else {
             if (packet->flags & AV_PKT_FLAG_CORRUPT) throw std::runtime_error("FFmpeg demux returned a corrupt video packet");
+            if (s.packet_cadence) {
+                if (!cadence.known) throw std::runtime_error("Missing parsed HEVC packet cadence");
+                av_buffer_unref(&packet->opaque_ref);
+                packet->opaque_ref = av_buffer_alloc(sizeof(cadence));
+                if (!packet->opaque_ref) throw std::bad_alloc();
+                std::memcpy(packet->opaque_ref->data, &cadence, sizeof(cadence));
+            }
             s.check(avcodec_send_packet(s.decoder, packet.get()), "avcodec_send_packet [software]");
         }
     }

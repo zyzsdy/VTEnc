@@ -1,4 +1,5 @@
 #include "source_format.hpp"
+#include "hevc_cadence.hpp"
 #include "encoder_session.hpp"
 
 #include <span>
@@ -111,6 +112,18 @@ OSType source_pixel_format(CMFormatDescriptionRef format, bool allow_interlaced,
         if ((config[16] & 3) != 1) throw std::runtime_error("P2 requires 4:2:0 video chroma");
         depth = 8 + (config[17] & 7);
         if (8U + (config[18] & 7U) != depth) throw std::runtime_error("Mixed HEVC luma/chroma bit depth is unsupported");
+        const std::uint8_t* nal = nullptr;
+        std::size_t size = 0, count = 0;
+        check_status(CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, 0, &nal, &size, &count, nullptr), "Read HEVC parameter sets");
+        bool found = false;
+        field_coding = false;
+        for (std::size_t i=0;i<count;++i) {
+            check_status(CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, i, &nal, &size, nullptr, nullptr), "Read HEVC SPS");
+            if (size >= 2 && ((nal[0] >> 1) & 63) == 33) {
+                field_coding |= hevc_field_sequence({nal, size}); found = true;
+            }
+        }
+        if (!found) throw std::runtime_error("Missing HEVC SPS for frame/field coding");
     } else if (codec == kCMVideoCodecType_AV1) {
         const auto config = atom(format, CFSTR("av1C"));
         if (config.size() < 4 || config[0] != 0x81) throw std::runtime_error("Invalid av1C configuration");

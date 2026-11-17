@@ -36,7 +36,7 @@ def escape(data):
     return bytes(result)
 
 
-def fixture(binary, directory, name, first, soft_only=False):
+def fixture(binary, directory, name, first, soft_only=False, codec="h264", depth=8):
     # (top film ID, bottom film ID, H.264 pic_struct)
     sequence = [] if soft_only else [(i, i, 0) for i in range(5)]
     offset = len(sequence)
@@ -48,23 +48,29 @@ def fixture(binary, directory, name, first, soft_only=False):
             top, bottom = 13+i//5*4+a[i % 5], 13+i//5*4+b[i % 5]
             sequence.append((bottom if first else top, top if first else bottom, 4 if first else 3))
         sequence += [(i, i, 0) for i in range(21, 26)]
-    raw = directory / (name + '.nv12')
+    raw = directory / (name + ('.nv12' if depth==8 else '.p010'))
     with raw.open('wb') as target:
         for top, bottom, _ in sequence:
             frames = film(top), film(bottom)
             for plane_height, plane_offset in [(HEIGHT, 0), (HEIGHT//2, WIDTH*HEIGHT)]:
                 for y in range(plane_height):
                     start = plane_offset + y*WIDTH
-                    target.write(frames[y % 2][start:start+WIDTH])
-    coded = directory / (name + '-coded.h264')
+                    row = frames[y % 2][start:start+WIDTH]
+                    if depth==10:
+                        row = b''.join((value << 8).to_bytes(2, 'little') for value in row)
+                    target.write(row)
+    coded = directory / (name + '-coded.' + ('h264' if codec=='h264' else 'hevc'))
     result = run([binary, '-i', raw, '-o', coded, '--input-res', f'{WIDTH}x{HEIGHT}',
-                  '--frames', len(sequence), '--fps', '30000/1001', '--gop-len', '1', '--bitrate', '12000'])
+                  '--frames', len(sequence), '--fps', '30000/1001', '--gop-len', '1', '--bitrate', '12000',
+                  '--codec', codec, '--output-depth', depth])
     require('Hardware verified: yes' in result.stdout+result.stderr, 'Fixture encoder is not verified hardware')
     trace = run(['ffmpeg', '-v', 'verbose', '-i', coded, '-c', 'copy', '-frames:v', '1',
                  '-bsf:v', 'trace_headers', '-f', 'null', '-']).stderr
     match = re.search(r'\] (\d+)\s+vui_parameters_present_flag\s+[01] = [01]', trace)
     require(match, 'Cannot locate hardware SPS VUI')
     position = int(match[1])
+    if codec == 'hevc':
+        position = int(re.search(r'\] (\d+)\s+frame_field_info_present_flag\s+0 = 0', trace)[1])
     # Replace only SPS VUI, with explicit limited BT.709, 60000/1001 field
     # clock, no HRD, pic_struct_present_flag=1. Slice picture data is untouched.
     vui = '001'+'101'+'0'+'1'+f'{1:08b}{1:08b}{1:08b}'+'0'+'1'+f'{1001:032b}{60000:032b}'+'10010'
@@ -72,21 +78,26 @@ def fixture(binary, directory, name, first, soft_only=False):
     for nal in re.split(b'\x00\x00\x00?\x01', coded.read_bytes()):
         if not nal:
             continue
-        kind = nal[0] & 31
-        if kind == 7:
+        kind = nal[0] & 31 if codec=='h264' else (nal[0] >> 1) & 63
+        if kind == (7 if codec=='h264' else 33):
             bits = ''.join(f'{byte:08b}' for byte in nal.replace(b'\0\0\3', b'\0\0'))
-            bits = bits[:position]+'1'+vui+'1'
+            bits = bits[:position]+'1'+vui+'1' if codec=='h264' else bits[:position]+'1'+bits[position+1:]
             bits += '0' * (-len(bits) % 8)
             nal = escape(bytes(int(bits[i:i+8], 2) for i in range(0, len(bits), 8)))
-        if kind in (1, 5):
+        if (codec=='h264' and kind in (1, 5)) or (codec=='hevc' and kind<32):
             require(index < len(sequence), 'Fixture requires one slice per hardware picture')
             pic = sequence[index][2]
             index += 1
             payload = (pic << 4) | (1 if pic in (5, 6) else 2 if pic in (3, 4) else 4)
-            result += b'\0\0\0\1\6\1\1'+bytes([payload])+b'\x80'
+            if codec=='h264':
+                result += b'\0\0\0\1\6\1\1'+bytes([payload])+b'\x80'
+            else:
+                # Progressive source flag matches hardware SPS. pic_struct
+                # still describes the field display cadence of woven rasters.
+                result += b'\0\0\0\1'+bytes([39<<1,1,1,1,(pic<<4)|5,128])
         result += b'\0\0\0\1'+nal
     require(index == len(sequence), 'Hardware picture/slice count mismatch')
-    elementary = directory / (name + '-rff.h264')
+    elementary = directory / (name + '-rff.' + ('h264' if codec=='h264' else 'hevc'))
     elementary.write_bytes(result)
     # Explicit packet timestamps avoid raw H.264 demux frame-rate estimation.
     soft = f'clip(N-{offset},0,8)'
@@ -100,7 +111,12 @@ def fixture(binary, directory, name, first, soft_only=False):
     output = directory / (name + '.mp4')
     run(['ffmpeg', '-nostdin', '-v', 'error', '-i', elementary, '-map', '0:v', '-c', 'copy', '-bsf:v', bsf, '-video_track_timescale', '60000', output])
     frames = json.loads(run(['ffprobe', '-v', 'error', '-show_frames', '-select_streams', 'v', '-of', 'json', output]).stdout)['frames']
-    require([f['repeat_pict'] for f in frames] == [int(s[2] in (5, 6)) for s in sequence], 'Fixture RFF flags are missing')
+    if codec=='h264':
+        require([f['repeat_pict'] for f in frames] == [int(s[2] in (5, 6)) for s in sequence], 'Fixture RFF flags are missing')
+    else:
+        traced = run(['ffmpeg','-v','verbose','-i',output,'-c','copy','-bsf:v','trace_headers','-f','null','-']).stderr
+        found = [int(x) for x in re.findall(r'\bpic_struct\s+[01]+ = (\d+)', traced)]
+        require(found == [s[2] for s in sequence], 'HEVC fixture picture-timing SEI mismatch')
     _, source_packets = packets(probe(output), 'video')
     end = Fraction(1, 5)
     for packet, picture in zip(source_packets, sequence):
@@ -108,44 +124,6 @@ def fixture(binary, directory, name, first, soft_only=False):
         require(packet['time'] == end and packet['length'] == length, 'Fixture packet time drift')
         end += length
     return output, sequence
-
-
-def check_hevc_metadata_gap(binary, directory):
-    # FFmpeg currently loses HEVC pic_struct=5/6 in both public frame/parser
-    # APIs. Prove that this stream fails explicitly instead of losing RFF.
-    coded = directory/'hevc-coded.hevc'
-    result = run([binary, '-i', directory/'soft-tff.nv12', '-o', coded,
-                  '--input-res', f'{WIDTH}x{HEIGHT}', '--frames', '8', '--gop-len', '1', '--codec', 'hevc'])
-    require('Hardware verified: yes' in result.stdout+result.stderr, 'HEVC fixture is not hardware encoded')
-    trace = run(['ffmpeg', '-v', 'verbose', '-i', coded, '-c', 'copy', '-frames:v', '1',
-                 '-bsf:v', 'trace_headers', '-f', 'null', '-']).stderr
-    match = re.search(r'\] (\d+)\s+frame_field_info_present_flag\s+0 = 0', trace)
-    require(match, 'Cannot locate HEVC SPS field info flag')
-    position = int(match[1])
-    data = bytearray()
-    for nal in re.split(b'\x00\x00\x00?\x01', coded.read_bytes()):
-        if not nal:
-            continue
-        kind = (nal[0] >> 1) & 63
-        if kind == 33:
-            bits = ''.join(f'{byte:08b}' for byte in nal.replace(b'\0\0\3', b'\0\0'))
-            bits = bits[:position]+'1'+bits[position+1:]
-            nal = escape(bytes(int(bits[i:i+8], 2) for i in range(0, len(bits), 8)))
-        if kind < 32:
-            data += b'\0\0\0\1'+bytes([39 << 1, 1, 1, 1, 0x50, 0x80])
-        data += b'\0\0\0\1'+nal
-    elementary = directory/'hevc-rff.hevc'
-    elementary.write_bytes(data)
-    source = directory/'hevc-rff.mp4'
-    run(['ffmpeg', '-nostdin', '-v', 'error', '-i', elementary, '-c', 'copy', source])
-    for mode in ['avhw', 'avsw', 'automatic']:
-        output = directory/('hevc-rejected-'+mode+'.mp4')
-        result = run([binary, '-i', source, '-o', output, '--vpp-ivtc', 'mixed=true',
-                      *([] if mode == 'automatic' else ['--'+mode])], expected=1)
-        require('cannot reliably read HEVC picture-timing/RFF metadata' in result.stderr,
-                'HEVC RFF limitation was hidden')
-        require(not output.exists(), 'Rejected HEVC metadata left a completed output')
-    return {'case': 'hevc-metadata-rejection', 'decoder_paths': 3}
 
 
 def main():
@@ -212,7 +190,6 @@ def main():
                     require(min(errors) > 40, f'{case}: wrong film exposure or field weave: min PSNR {min(errors)}')
                     report.append({'case': case, 'coded_frames': len(sequence), 'output_frames': expected_count,
                                    'min_psnr': min(errors), 'audio_packets': len(a), 'exact_timeline': True})
-    report.append(check_hevc_metadata_gap(args.vtenc.resolve(), directory))
     (directory/'report.json').write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps({'directory': str(directory), 'cases': report}, indent=2))
 

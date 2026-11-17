@@ -4,7 +4,7 @@
 struct AVCodecParameters;
 struct AVPacket;
 namespace vtenc {
-// Metadata-only H.264 parser. No software decoder is opened or run.
+// Metadata-only H.264/HEVC parser. No software decoder is opened or run.
 class CadenceParser {
 public:
     explicit CadenceParser(const AVCodecParameters* parameters);

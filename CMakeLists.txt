@@ -59,6 +59,7 @@ add_library(vtenc_apple STATIC
     src/apple/ivtc.cpp
     src/apple/rff.cpp
     src/apple/cadence_parser.cpp
+    src/apple/hevc_cadence.cpp
     src/apple/gpu_filter.mm
     src/apple/source_format.cpp
     src/apple/avformat_input.cpp
@@ -109,6 +110,15 @@ if(BUILD_TESTING)
     add_executable(vtenc_ivtc_test tests/ivtc_hardware.cpp)
     target_include_directories(vtenc_ivtc_test PRIVATE src/apple)
     target_link_libraries(vtenc_ivtc_test PRIVATE vtenc_apple vtenc_options)
+    # Explicit fixture generator, no video encoder or automatic hardware tests.
+    add_executable(vtenc_hevc_rff_remux tests/hevc_rff_remux.cpp)
+    target_include_directories(vtenc_hevc_rff_remux PRIVATE src/apple)
+    target_link_libraries(vtenc_hevc_rff_remux PRIVATE vtenc_apple vtenc_options)
+    add_executable(vtenc_hevc_cadence_test tests/hevc_cadence_test.cpp)
+    target_include_directories(vtenc_hevc_cadence_test PRIVATE src/apple)
+    target_link_libraries(vtenc_hevc_cadence_test PRIVATE vtenc_apple vtenc_options)
+    add_test(NAME vtenc.hevc-cadence COMMAND vtenc_hevc_cadence_test)
+    set_tests_properties(vtenc.hevc-cadence PROPERTIES LABELS "cadence" TIMEOUT 15)
     add_executable(vtenc_timeline_test tests/timeline_test.cpp)
     target_include_directories(vtenc_timeline_test PRIVATE src/apple)
     target_link_libraries(vtenc_timeline_test PRIVATE vtenc_apple vtenc_options)

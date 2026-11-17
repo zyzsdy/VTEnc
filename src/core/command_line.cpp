@@ -397,9 +397,11 @@ Thresholds use 8-bit units; combpel is 1..128, other thresholds 0..255.
 Full cycles retain their original time span; incomplete tails retain all frames.
 Use --field-order tff|bff for hard rasters when metadata is missing or varies;
 original RFF flags retain their per-picture field order. Mixed mode requires
-per-picture metadata. Native H.264 parses SEI without software decoding;
-unavailable native metadata follows the explicit decode failure/retry policy.
-HEVC picture-timing SEI is rejected: neither public FFmpeg API retains its RFF.
+per-picture metadata. Native H.264 parses SEI without software decoding.
+HEVC parses SPS/PPS/VUI and picture-timing for both native and software decode,
+including reordered pictures and in-band parameter sets (hvcC or Annex B).
+Missing required timing, reserved pic_struct, multilayer or separately coded
+HEVC fields fail explicitly; complete-frame soft/hard telecine is supported.
 Raw IVTC input, cadence lock and other NVEnc IVTC parameters are unsupported.
 Interlaced input requires explicit --vpp-ivtc or --deinterlace bob. Bob produces
 two Metal outputs per input. Auto field order requires unambiguous metadata; tff/bff overrides it.

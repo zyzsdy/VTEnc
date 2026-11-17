@@ -57,28 +57,6 @@ std::vector<Bytes> length_prefixed(Bytes bytes, unsigned length_size) {
     }
     return result;
 }
-// libavcodec's HEVC frame/parser API does not retain 3:2 pic_struct=5/6.
-// Reject picture-timing streams in both decoding paths instead of silently
-// treating them as progressive with zero repeats. No private FFmpeg ABI is used.
-void require_hevc_cadence(Bytes nal) {
-    if (nal.size() < 2 || (((nal[0] >> 1) & 63) != 39 && ((nal[0] >> 1) & 63) != 40)) return;
-    std::vector<std::uint8_t> rbsp;
-    int zeros = 0;
-    for (auto byte : nal.subspan(2)) {
-        if (zeros == 2 && byte == 3) { zeros = 0; continue; }
-        rbsp.push_back(byte); zeros = byte == 0 ? zeros + 1 : 0;
-    }
-    std::size_t offset = 0;
-    while (offset + 1 < rbsp.size()) {
-        std::size_t type = 0, length = 0;
-        unsigned byte = 0;
-        do { if (offset >= rbsp.size()) throw std::runtime_error("Truncated HEVC SEI type"); byte = rbsp[offset++]; type += byte; } while (byte == 255);
-        do { if (offset >= rbsp.size()) throw std::runtime_error("Truncated HEVC SEI size"); byte = rbsp[offset++]; length += byte; } while (byte == 255);
-        if (length > rbsp.size() - offset) throw std::runtime_error("Truncated HEVC SEI payload");
-        if (type == 1) throw std::runtime_error("IVTC cannot reliably read HEVC picture-timing/RFF metadata in either decoder; expand=off,mixed=false is only valid for known hard telecine");
-        offset += length;
-    }
-}
 CFRef<CFMutableDictionaryRef> metadata(const AVCodecParameters* p) {
     CFRef result(CFDictionaryCreateMutable(nullptr, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
     const auto set = [&](CFStringRef key, CFTypeRef value) { if (value) CFDictionarySetValue(result.get(), key, value); };
@@ -309,14 +287,14 @@ const MediaInfo& ContainerInput::info() const { return impl_->info; }
 const AVCodecParameters* ContainerInput::video_parameters() const { return impl_->demux->streams[impl_->video]->codecpar; }
 AVRational ContainerInput::video_time_base() const { return impl_->demux->streams[impl_->video]->time_base; }
 PacketPtr ContainerInput::read_audio() { return impl_->read(impl_->audio); }
-PacketPtr ContainerInput::read_video_packet() {
+PacketPtr ContainerInput::read_video_packet(FrameCadence* cadence) {
     auto packet = impl_->read(impl_->video);
-    if (packet && impl_->require_cadence && video_parameters()->codec_id == AV_CODEC_ID_HEVC) {
-        const auto* p = video_parameters();
-        const Bytes bytes(packet->data, static_cast<std::size_t>(packet->size));
-        const bool hvcc = p->extradata_size >= 23 && p->extradata[0] == 1;
-        const auto nals = hvcc ? length_prefixed(bytes, (p->extradata[21] & 3) + 1) : annex_b(bytes);
-        for (auto nal : nals) require_hevc_cadence(nal);
+    if (cadence) {
+        *cadence = {};
+        if (packet && impl_->require_cadence && video_parameters()->codec_id == AV_CODEC_ID_HEVC) {
+            if (!impl_->cadence_parser) impl_->cadence_parser = std::make_unique<CadenceParser>(video_parameters());
+            *cadence = impl_->cadence_parser->parse(packet.get());
+        }
     }
     return packet;
 }
@@ -325,18 +303,15 @@ CMVideoFormatDescriptionRef ContainerInput::hardware_video_format() try {
     return impl_->info.video_format;
 } catch (const std::runtime_error& error) { throw HardwareDecodeError(error.what()); }
 CMSampleBufferRef ContainerInput::read_video(FrameCadence* cadence) {
-    auto packet = read_video_packet();
+    auto packet = read_video_packet(cadence);
     if (!packet) return nullptr;
     auto format = hardware_video_format();
     const auto codec = video_parameters()->codec_id;
     if (cadence) {
-        *cadence = {};
         if (codec == AV_CODEC_ID_H264) {
             if (!impl_->cadence_parser) impl_->cadence_parser = std::make_unique<CadenceParser>(video_parameters());
             *cadence = impl_->cadence_parser->parse(packet.get());
-        } else if (codec == AV_CODEC_ID_HEVC || codec == AV_CODEC_ID_AV1) {
-            // Complete progressive rasters only. HEVC picture-timing SEI
-            // is checked by read_video_packet for both decoding paths.
+        } else if (codec == AV_CODEC_ID_AV1) {
             if (video_parameters()->field_order != AV_FIELD_UNKNOWN && video_parameters()->field_order != AV_FIELD_PROGRESSIVE)
                 throw HardwareDecodeError("Native decoder cannot preserve per-picture field metadata for this stream; use --avsw");
             cadence->known = true;

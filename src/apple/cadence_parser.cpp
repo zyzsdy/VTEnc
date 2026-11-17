@@ -1,15 +1,21 @@
 #include "cadence_parser.hpp"
 #include "ffmpeg_utils.hpp"
 #include "decode_policy.hpp"
+#include "hevc_cadence.hpp"
 
 namespace vtenc {
 struct CadenceParser::Impl {
+    std::unique_ptr<HevcCadenceParser> hevc;
     AVCodecParserContext* parser = nullptr;
     AVCodecContext* context = nullptr;
     ~Impl() { if (parser) av_parser_close(parser); avcodec_free_context(&context); }
 };
 CadenceParser::CadenceParser(const AVCodecParameters* parameters) : impl_(std::make_unique<Impl>()) {
     auto& s = *impl_;
+    if (parameters->codec_id == AV_CODEC_ID_HEVC) {
+        s.hevc = std::make_unique<HevcCadenceParser>(std::span(parameters->extradata, static_cast<std::size_t>(parameters->extradata_size)));
+        return;
+    }
     if (parameters->codec_id != AV_CODEC_ID_H264) throw HardwareDecodeError("No reliable native cadence parser for this codec");
     s.parser = av_parser_init(parameters->codec_id);
     if (!s.parser) throw HardwareDecodeError("FFmpeg H.264 cadence parser is unavailable");
@@ -21,6 +27,13 @@ CadenceParser::CadenceParser(const AVCodecParameters* parameters) : impl_(std::m
 CadenceParser::~CadenceParser() = default;
 FrameCadence CadenceParser::parse(const AVPacket* packet) {
     auto& s = *impl_;
+    if (s.hevc) {
+        try { return s.hevc->parse(std::span(packet->data, static_cast<std::size_t>(packet->size))); }
+        catch (const std::runtime_error& error) {
+            throw std::runtime_error(std::string(error.what()) + " [packet PTS=" + std::to_string(packet->pts) +
+                ", DTS=" + std::to_string(packet->dts) + "]");
+        }
+    }
     std::uint8_t* output = nullptr;
     int size = 0;
     s.parser->repeat_pict = -1;

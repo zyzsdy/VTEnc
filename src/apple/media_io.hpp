@@ -41,7 +41,7 @@ public:
     // Returns +1 compressed samples, or null on clean end of that track.
     [[nodiscard]] CMSampleBufferRef read_video(FrameCadence* cadence = nullptr);
     [[nodiscard]] PacketPtr read_audio();
-    [[nodiscard]] PacketPtr read_video_packet();
+    [[nodiscard]] PacketPtr read_video_packet(FrameCadence* cadence = nullptr);
     [[nodiscard]] const AVCodecParameters* video_parameters() const;
     [[nodiscard]] AVRational video_time_base() const;
     [[nodiscard]] CMVideoFormatDescriptionRef hardware_video_format();
