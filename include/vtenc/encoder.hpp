@@ -17,8 +17,8 @@ struct EncodeResult {
     bool timestamps_csv = false;
 };
 
-// Hardware only. Muxer selected by filename/override; raw elementary output also publishes a timestamps CSV.
-// On cancellation drains submitted frames, discards temporary files, and returns cancelled.
+// Hardware only. Muxer selected by filename/override; raw elementary file output also publishes a timestamps CSV.
+// On cancellation drains submitted frames and discards temporary files. Stdout cannot be retracted.
 [[nodiscard]] EncodeResult encode_video(const EncodeConfig& config,
     const volatile std::sig_atomic_t& cancelled);
 

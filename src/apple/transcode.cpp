@@ -404,7 +404,7 @@ void validate_video_edit(CMTimeMapping mapping, CMTime first_pts, CMTime last_pt
     // PTS. Preserve that whole final frame, but reject material trailing trims.
 }
 
-static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled, bool& replayable) {
+static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled, bool& replayable, bool& stdout_started) {
     if (cancelled) throw MediaCancelled{};
     ContainerInput input(config, cancelled);
     replayable = input.info().replayable;
@@ -413,7 +413,10 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
     adopt(video, encoder.next());
     if (cancelled) { encoder.finish(); return {0, 0, true}; }
     if (!video) throw std::runtime_error("No encoded video output");
-    ContainerOutput output(config, input.info(), CMSampleBufferGetFormatDescription(video->get()));
+    // After muxing starts, even the buffered header belongs to this attempt.
+    // A retry must never append another stream to irreversible stdout output.
+    stdout_started = config.output == "-";
+    ContainerOutput output(config, input.info(), CMSampleBufferGetFormatDescription(video->get()), cancelled);
     auto audio = input.read_audio();
     std::int64_t video_count = 0;
     std::int64_t audio_count = 0;
@@ -444,12 +447,15 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
 
 EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled) try {
     bool replayable = false;
+    bool stdout_started = false;
     return with_decode_policy(config.decode, [&](DecodeMode mode) {
         auto attempt = config;
         attempt.decode = mode;
-        return transcode_attempt(attempt, cancelled, replayable);
+        return transcode_attempt(attempt, cancelled, replayable, stdout_started);
     }, [&](const HardwareDecodeError& error) {
         if (cancelled) throw MediaCancelled{};
+        if (stdout_started) throw std::runtime_error(std::string(error.what()) +
+            "; stdout muxing has started: cannot restart without corrupting the output; select --avsw in advance");
         if (!replayable) throw std::runtime_error(std::string(error.what()) +
             "; input is not seekable: cannot restart from the beginning; select --avsw before consuming it");
         std::cerr << "vtenc: hardware decode failed: " << error.what()

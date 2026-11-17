@@ -8,7 +8,7 @@
 - 使用 C++20。CLI、参数验证、调度、时间轴以及 VideoToolbox / CoreMedia / CoreVideo 的 C API 使用 `.cpp`。
 - 仅在调用 Objective-C API（如 Metal、AVFoundation）时使用 `.mm`，开启 ARC；公开头文件保持 C++ 接口，不暴露 Objective-C 对象。
 - 原生调用 VideoToolbox，编码端强制硬件编码并检查实际使用的后端，不得引入软件视频编码器。压缩输入统一使用 FFmpeg libavformat 解封装，不按扩展名或格式白名单预筛选，探测失败直接报告错误。解码支持 `--avhw` 强制硬解、`--avsw` 使用 libavcodec 软解；默认先硬解，硬解失败时输出诊断并从头软解重试一次。不得静默回退，编码、滤镜与输出错误不触发软解重试。
-- 输出由 libavformat 根据目标文件名选择封装器，`-f` / `--output-format` 可显式覆盖；不维护输出格式白名单。编码始终使用硬件，封装或流兼容性错误直接退出。
+- 输出由 libavformat 根据目标文件名选择封装器，`-f` / `--output-format` 可显式覆盖；不维护输出格式白名单。编码始终使用硬件，封装或流兼容性错误直接退出。`-o -` 必须显式指定封装器，stdout 只写码流，任务日志和诊断全部写 stderr；开始 stdout 封装后不得从头重试，避免拼接损坏码流。
 - 借鉴 NVEncC 的模块划分和 CLI 习惯，不机械映射 NVIDIA 专有参数。引入上游代码前核查许可证并保留声明。
 - CoreFoundation 对象采用 RAII；异步回调不得让 C++ 异常跨越 C ABI，错误必须传回调度线程。时间戳使用整数有理数。
 

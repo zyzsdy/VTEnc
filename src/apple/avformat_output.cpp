@@ -53,6 +53,12 @@ struct ContainerOutput::Impl {
     AVStream* audio = nullptr;
     AVRational source_audio_base{};
     std::string directory, temporary, destination;
+    bool stdout_output = false;
+    const volatile std::sig_atomic_t* cancelled = nullptr;
+    static int interrupt(void* opaque) noexcept {
+        const auto& s = *static_cast<const Impl*>(opaque);
+        return s.cancelled && *s.cancelled;
+    }
     bool finished = false;
     bool reported_audio_rescale = false;
     bool reported_video_rescale = false;
@@ -86,26 +92,36 @@ struct ContainerOutput::Impl {
         if (mux && mux->pb) av_check(mux->pb->error, "avformat output I/O");
     }
 };
-ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& info, CMFormatDescriptionRef format)
+ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& info, CMFormatDescriptionRef format,
+                                 const volatile std::sig_atomic_t& cancelled)
     : impl_(std::make_unique<Impl>()) {
     auto& s = *impl_;
     s.destination = config.output;
-    struct stat existing{};
-    if (lstat(config.output.c_str(), &existing) == 0) throw std::runtime_error("Output already exists: " + config.output);
-    if (errno != ENOENT) throw std::runtime_error("Inspect output: " + std::string(std::strerror(errno)));
+    s.stdout_output = config.output == "-";
+    s.cancelled = &cancelled;
+    if (s.stdout_output) {
+        if (config.output_format.empty()) throw std::runtime_error("-o - requires -f/--output-format");
+    } else {
+        struct stat existing{};
+        if (lstat(config.output.c_str(), &existing) == 0) throw std::runtime_error("Output already exists: " + config.output);
+        if (errno != ENOENT) throw std::runtime_error("Inspect output: " + std::string(std::strerror(errno)));
+    }
     // Use the real destination for guessing, not the extensionless temporary file.
     av_check(avformat_alloc_output_context2(&s.mux, nullptr,
         config.output_format.empty() ? nullptr : config.output_format.c_str(), config.output.c_str()),
         "avformat_alloc_output_context2 [use -f/--output-format to specify the muxer]");
     if (!s.mux) throw std::runtime_error("No output mux context");
     if (s.mux->oformat->flags & AVFMT_NOFILE) {
-        throw std::runtime_error("Selected muxer manages its own files/IO; transactional single-file output is required");
+        throw std::runtime_error("Selected muxer manages its own files/IO; a single output stream is required (transactional single-file or stdout)");
     }
-    auto pattern = config.output + ".part.XXXXXX";
-    if (!mkdtemp(pattern.data())) throw std::runtime_error("Create output directory: " + std::string(std::strerror(errno)));
-    s.directory = std::move(pattern); s.temporary = s.directory + "/media";
+    if (!s.stdout_output) {
+        auto pattern = config.output + ".part.XXXXXX";
+        if (!mkdtemp(pattern.data())) throw std::runtime_error("Create output directory: " + std::string(std::strerror(errno)));
+        s.directory = std::move(pattern); s.temporary = s.directory + "/media";
+    }
+    const auto target = s.stdout_output ? "pipe:1" : s.temporary.c_str();
     av_freep(&s.mux->url);
-    s.mux->url = av_strdup(s.temporary.c_str());
+    s.mux->url = av_strdup(target);
     if (!s.mux->url) throw std::bad_alloc();
     // Configure optional muxer capabilities, without maintaining a format list.
     const auto has_option = [&](const char* name) {
@@ -184,13 +200,17 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
         }
     }
     if (movie_clock && movie_scale > std::numeric_limits<std::int32_t>::max()) throw std::runtime_error("Movie timescale exceeds 32-bit range");
-    av_check(avio_open(&s.mux->pb, s.temporary.c_str(), AVIO_FLAG_WRITE), "avio_open output");
+    const AVIOInterruptCB interrupt{&Impl::interrupt, &s};
+    av_check(avio_open2(&s.mux->pb, target, AVIO_FLAG_WRITE,
+                       s.stdout_output ? &interrupt : nullptr, nullptr), "avio_open output");
     AVDictionary* options = nullptr;
     if (has_option("video_track_timescale")) av_dict_set_int(&options, "video_track_timescale", scale, 0);
     if (movie_clock) av_dict_set_int(&options, "movie_timescale", movie_scale, 0);
     const int status = avformat_write_header(s.mux, &options);
     av_dict_free(&options);
-    av_check(status, "avformat_write_header [selected muxer must accept the video codec and copied audio; use --no-audio to omit audio]");
+    av_check(status, s.stdout_output
+        ? "avformat_write_header [stdout requires a non-seekable muxer accepting the video codec and copied audio; use --no-audio to omit audio]"
+        : "avformat_write_header [selected muxer must accept the video codec and copied audio; use --no-audio to omit audio]");
 }
 ContainerOutput::~ContainerOutput() = default;
 void ContainerOutput::append_video(CMSampleBufferRef sample) {
@@ -236,9 +256,14 @@ std::uint64_t ContainerOutput::finish(const volatile std::sig_atomic_t& cancelle
     av_check(av_write_trailer(s.mux), "av_write_trailer");
     avio_flush(s.mux->pb);
     s.check();
+    const auto written = avio_tell(s.mux->pb);
     av_check(avio_closep(&s.mux->pb), "avio_close output");
     s.finished = true;
     if (cancelled) return 0;
+    if (s.stdout_output) {
+        if (written <= 0) throw std::runtime_error("Stdout output is empty or its byte count is invalid");
+        return static_cast<std::uint64_t>(written);
+    }
     const auto bytes = std::filesystem::file_size(s.temporary);
     if (!bytes) throw std::runtime_error("Container output is empty");
     if (link(s.temporary.c_str(), s.destination.c_str()) != 0) throw std::runtime_error("Publish container [" + s.destination + "]: " + std::strerror(errno));

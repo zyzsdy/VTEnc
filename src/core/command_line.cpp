@@ -181,8 +181,11 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (synthetic == !result.encode.input.empty()) {
             throw std::invalid_argument("Encoding requires exactly one source: --synthetic or -i input-file");
         }
-        if (result.encode.output.empty() || result.encode.output == "-") {
-            throw std::invalid_argument("Encoding requires -o output-file (stdout is not supported)");
+        if (result.encode.output.empty()) {
+            throw std::invalid_argument("Encoding requires -o output-file");
+        }
+        if (result.encode.output == "-" && result.encode.output_format.empty()) {
+            throw std::invalid_argument("-o - requires -f/--output-format to select the stdout muxer");
         }
         // Compressed input is probed by avformat, independent of its extension.
         // --input-res explicitly selects the existing tightly packed raw path.
@@ -257,11 +260,13 @@ both planes, left chroma siting per field, height divisible by four.
 Output: avformat selects the muxer from the filename; -f/--output-format overrides
 the filename with an FFmpeg muxer name (e.g. matroska, mpegts, mp4). Unknown formats
 and incompatible streams fail; no output-format whitelist. Existing files are never
-overwritten. Output requires a local single file; muxers managing their own IO
-(e.g. HLS/segment) and stdout are not supported. Raw/synthetic H.264/HEVC elementary
-output also writes a timestamps CSV.
+overwritten. -o - streams to stdout and requires -f/--output-format; all job logs
+go to stderr. The muxer must support non-seekable output. Muxers managing their own
+IO (e.g. HLS/segment) are not supported. Raw/synthetic elementary file output also
+writes a timestamps CSV; stdout never writes sidecar files.
 P1 disables frame reordering. --quality is native VT Quality, not CRF/CQP.
-SIGINT drains submitted frames and discards the incomplete output (exit 130).
+SIGINT drains submitted frames (exit 130). Incomplete files are discarded; stdout
+bytes already written cannot be retracted.
 Feature probing creates a hardware-only 1920x1080 VideoToolbox session.
 Listed properties are not validated value combinations; the probe encodes no frames.
 Compressed input: avformat probes any format; hardware-only encode.
@@ -272,7 +277,8 @@ First audio track copied by default; the selected output must accept its codec.
 Default: try hardware decoding, then restart once with software decoding on a
 replayable input after a decoder failure. Non-seekable input cannot be restarted;
 select --avsw in advance when hardware decoding is unavailable. Encoder, filter,
-demux and output failures never trigger a retry.
+demux and output failures never trigger a retry. Once stdout muxing has started,
+hardware decode failure is fatal: retrying would concatenate incomplete streams.
 Video PTS/VFR are rescaled to the muxer time base; rounding is reported and limited
 to half an output tick, and collapsed frame intervals fail. Metadata preservation
 depends on the selected container. If the final frame duration is absent, the

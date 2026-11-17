@@ -71,7 +71,7 @@ cmake --install build/release --prefix "$PWD/build/install"
 
 能力探测固定使用 1920×1080 的 NV12 / P010 输入约束，设置对应 Profile，准备会话并核验 `UsingHardwareAcceleratedVideoEncoder`。它不提交帧，不验证真实码流，不代表最大分辨率、吞吐量或属性值组合均可用。硬件忙、配置不受支持等错误直接报告 OSStatus 并以非零状态退出，不降级到软件编码。
 
-退出码：`0` 成功、`1` 运行时或硬件错误、`2` 参数错误、`130` 用户取消。结果写入 stdout，诊断写入 stderr。当前只提供文本输出，JSON 协议留待后续实现。
+退出码：`0` 成功、`1` 运行时或硬件错误、`2` 参数错误、`130` 用户取消。文件输出任务的结果写入 stdout，诊断写入 stderr。使用 `-o -` 时 stdout 只含媒体码流，结果、日志和诊断全部写入 stderr。文本结果尚不提供 JSON 协议。
 
 ## P1 硬件编码
 
@@ -97,7 +97,7 @@ python3 tests/encode_hardware.py --vtenc build/dev/vtenc
 
 默认平均码率目标为 5000 kbit/s。`--bitrate` 绑定 `AverageBitRate`，是软目标，不保证输出大小；`--quality` 绑定原生 `Quality`，不等价于 CRF/CQP，两者不能同时指定。`--gop-len` 是最大关键帧间隔，编码器可以提前插入关键帧。所有属性设置检查 OSStatus，不支持就失败，不做软件回退。
 
-输出格式由文件名或 `-f` / `--output-format` 决定，例如 `.mkv`、`.ts`、`.mp4`，与压缩输入转码使用相同的封装器选择规则。选择与编码器匹配的 H.264 / HEVC 裸码流时，保留 Annex B 和时间戳 CSV 输出：同步帧前写入 SPS/PPS（HEVC 还包括 VPS），将长度前缀 NAL 转为起始码。裸码流不携带容器级 PTS/DTS，播放器或 FFprobe 猜测的帧率可能不正确；封装时需指定本次输入帧率。`<输出路径>.timestamps.csv` 保存编码回调原始整数 PTS/DTS/duration、同步帧标记及该帧的字节范围；VideoToolbox 未指定的 DTS 保持为空，范围包括该帧前的参数集。
+输出格式由文件名或 `-f` / `--output-format` 决定，例如 `.mkv`、`.ts`、`.mp4`，与压缩输入转码使用相同的封装器选择规则。选择与编码器匹配的 H.264 / HEVC 裸码流文件时，保留 Annex B 和时间戳 CSV 输出（`-o -` 只有码流，不生成 CSV）：同步帧前写入 SPS/PPS（HEVC 还包括 VPS），将长度前缀 NAL 转为起始码。裸码流不携带容器级 PTS/DTS，播放器或 FFprobe 猜测的帧率可能不正确；封装时需指定本次输入帧率。`<输出路径>.timestamps.csv` 保存编码回调原始整数 PTS/DTS/duration、同步帧标记及该帧的字节范围；VideoToolbox 未指定的 DTS 保持为空，范围包括该帧前的参数集。
 
 同目录临时文件在全部排空、帧数与时间戳校验、硬件后端复核后发布；已有输出或时间戳文件均不覆盖。每批最多 8 帧，回调只保留样本或记录错误，调度线程负责码流写出。SIGINT 停止新提交、排空已提交帧、删除临时输出并返回 130。运行错误返回 1 并清理临时输出；进程被强制杀死或系统崩溃时可能残留 `.part.*` 文件。两个文件分别原子发布，不承诺跨文件的崩溃事务。
 
@@ -138,12 +138,28 @@ python3 tests/transcode_hardware.py --vtenc build/dev/vtenc
 ./build/dev/vtenc -i input.mkv -o build/output.h264 --no-audio
 ```
 
-`-f` 与 `--output-format` 是同一选项，重复指定报错。格式名称由链接的 FFmpeg 提供，不在 CLI 中维护名单，也不会改变 `--codec` 的选择。输出保持本地单文件事务：完成后原子发布，不覆盖已有文件，失败或取消清理临时文件；不支持 stdout，也不支持自行管理 IO / 多文件的封装器（如 HLS、segment）。
+`-f` 与 `--output-format` 是同一选项，重复指定报错。格式名称由链接的 FFmpeg 提供，不在 CLI 中维护名单，也不会改变 `--codec` 的选择。本地文件输出保持单文件事务：完成后原子发布，不覆盖已有文件，失败或取消清理临时文件。不支持自行管理 IO / 多文件的封装器（如 HLS、segment）。
+
+`-o -`（或 `--output -`）直接流式写入标准输出，必须显式提供 `-f` / `--output-format`，缺少格式在打开输入和硬件会话之前返回参数错误。压缩输入、原始帧和合成输入均适用；不创建名为 `-` 的文件、临时输出或时间戳 CSV，所有任务日志和诊断写入 stderr。
+
+```bash
+# 媒体流与日志分别重定向
+./build/dev/vtenc --avhw -i input.mkv -o - -f mpegts > output.ts 2> vtenc.log
+# 直接通过管道交给后续程序
+./build/dev/vtenc --avsw -i input.ts -o - --output-format matroska | ffplay -i -
+# 原始裸码流也可输出到管道
+./build/dev/vtenc --synthetic --input-res 320x180 --frames 60 -o - -f h264 > output.h264
+```
+
+stdout 始终按不可 seek 的流交给 avformat。所选封装器必须能写入这种流；例如 MPEG-TS、Matroska、H.264/HEVC 裸码流可用，默认 MP4/MOV 需要 seek 回写，会明确报错；当前不自动启用 fragmented MP4。编码始终为硬件，不因目标封装改变编码器。
+
+标准输出已经发送的字节无法撤回。默认解码模式只允许在开始 stdout 封装之前、且输入可从头读取时软解重试一次；开始封装后的硬解错误直接退出，避免拼接两次转码的码流。若需要确保使用软解，应预先指定 `--avsw`。取消和失败可能留下部分码流；下游必须检查退出码。下游提前关闭管道会报告 Broken pipe 并返回 1，SIGINT 返回 130，诊断不会声称标准输出已被删除。
 
 显式运行输出封装回归（不注册为默认 CTest）：
 
 ```bash
 python3 tests/output_formats_hardware.py --vtenc build/dev/vtenc
+python3 tests/stdout_hardware.py --vtenc build/dev/vtenc
 ```
 
 压缩输入 `-i -` 交给 avformat 读取标准输入。不可 seek 的管道 / 实时输入无法从头重试：默认模式若硬解失败，会明确报错并提示预先选择 `--avsw`，不会从已消耗数据的中间位置伪造一次成功重试。
@@ -183,7 +199,7 @@ FFmpeg 来自外部安装，本仓库没有复制其上游实现。FFmpeg 的基
 
 当前限定一个 SDR 视频轨；交错输入必须显式启用 Bob。支持位深、尺寸和基础色彩转换；不支持 HDR / Dolby Vision、音频转码、多音轨选择、字幕、章节与附件。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
 
-取消或运行错误不发布成品，临时目录自动清理；成功写完 trailer、检查写入错误并关闭文件后，以不覆盖既有文件的方式发布。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
+本地文件任务取消或运行错误不发布成品，临时目录自动清理；成功写完 trailer、检查写入错误并关闭文件后，以不覆盖既有文件的方式发布。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
 
 已使用 `video_samples` 的全部 13 个原始样片实施正向转码或明确拒绝检查，另以无重编码派生 MOV 验证输入容器和旋转。9 个成功转码用例的码流和时间轴均通过独立检查，VFR 音轨逐包哈希、PTS 和解码 PCM 完全一致。详见 [P2 验证记录](docs/P2验证.md)。
 
@@ -211,7 +227,7 @@ python3 tests/filter_hardware.py --vtenc build/dev/vtenc
 
 支持 left、center、top-left 输入色度位置，Metal 输出统一重采样为 left。优先读取解码缓冲区 / 格式描述；缺失或不支持时需要 `--input-chroma-loc left|center|top-left` 明确解释。转换后的实际码流位深、range、颜色和色度标记会核查，不能仅修改标签冒充转换。
 
-GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理路径不锁定或复制 CPU 像素，无 CPU 滤镜回退。每帧等待 Metal 命令成功完成后提交硬编，保留原 PTS / duration，输出缓冲池最多 3 个。stdout 的 `Metal GPU frames completed` 统计成功提交硬编的已完成 GPU 帧；无需滤镜且位深相同时为 0。
+GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理路径不锁定或复制 CPU 像素，无 CPU 滤镜回退。每帧等待 Metal 命令成功完成后提交硬编，保留原 PTS / duration，输出缓冲池最多 3 个。任务结果中的 `Metal GPU frames completed` 统计成功提交硬编的已完成 GPU 帧；无需滤镜且位深相同时为 0。
 
 当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持 HDR、tone mapping、色域 / 传递函数转换、物理旋转、Bicubic/Lanczos、字幕合成和运动自适应反交错。这些仍属于后续工作。
 

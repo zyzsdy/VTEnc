@@ -50,11 +50,13 @@ private:
 
 class ContainerOutput {
 public:
-    ContainerOutput(const EncodeConfig& config, const MediaInfo& info, CMFormatDescriptionRef encoded_format);
+    ContainerOutput(const EncodeConfig& config, const MediaInfo& info, CMFormatDescriptionRef encoded_format,
+                    const volatile std::sig_atomic_t& cancelled);
     ~ContainerOutput();
     void append_video(CMSampleBufferRef sample);
     void append_audio(const AVPacket* packet);
-    // Finishes and publishes only if not cancelled; returns zero on cancellation.
+    // Finishes and publishes files only if not cancelled; stdout is irreversible.
+    // Returns zero on cancellation. The cancellation flag must outlive the writer.
     [[nodiscard]] std::uint64_t finish(const volatile std::sig_atomic_t& cancelled);
 private:
     struct Impl;

@@ -46,7 +46,7 @@ check_cli(2 "^$" "finite number" ${job} --quality 0.5junk)
 check_cli(2 "^$" "cannot be combined" --check-features ${job})
 check_cli(2 "^$" "H.264 supports only 8-bit" ${job} --output-depth 10)
 check_cli(2 "^$" "Duplicate option" ${job} --output unused2.h264)
-check_cli(2 "^$" "stdout is not supported" --synthetic --input-res 320x180 --frames 17 -o -)
+check_cli(2 "^$" "requires -f/--output-format" --synthetic --input-res 320x180 --frames 17 -o -)
 check_cli(2 "^$" "stdin is not supported" -i - --input-res 320x180 --frames 17 -o unused.h264)
 
 # Container jobs reject unsupported timeline overrides before any I/O.
@@ -114,3 +114,8 @@ check_cli(2 "^$" "Duplicate option" ${file_job} --output-format mp4 -f matroska)
 check_cli(2 "^$" "cannot be combined" --help -f mp4)
 check_cli(1 "^$" "avformat_open_input" -i missing-input -o out.unknown -f matroska)
 check_cli(1 "^$" "avformat_open_input" -i missing-input -o no-extension --output-format mpegts)
+
+# Stdout must be explicitly formatted before opening input or hardware sessions.
+check_cli(2 "^$" "requires -f/--output-format" -i missing-input -o -)
+check_cli(1 "^$" "avformat_open_input" -i missing-input -o - -f mpegts)
+check_cli(1 "^$" "avformat_open_input" -i missing-input --output - --output-format matroska)

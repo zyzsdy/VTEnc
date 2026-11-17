@@ -25,11 +25,12 @@ namespace {
 // selection for every filename/override. Other muxers use the shared writer.
 class RawOutput {
 public:
-    explicit RawOutput(const EncodeConfig& config) : config_(config) {
+    RawOutput(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled)
+        : config_(config), cancelled_(cancelled) {
         const auto* format = config.output_format.empty()
             ? av_guess_format(nullptr, config.output.c_str(), nullptr)
             : av_guess_format(config.output_format.c_str(), nullptr, nullptr);
-        if (format && ((std::string_view(format->name) == "h264" && config.video.codec == Codec::h264) ||
+        if (config.output != "-" && format && ((std::string_view(format->name) == "h264" && config.video.codec == Codec::h264) ||
                        (std::string_view(format->name) == "hevc" && config.video.codec == Codec::hevc))) {
             elementary_ = std::make_unique<BitstreamOutput>(config);
         }
@@ -47,7 +48,7 @@ public:
             auto output_config = config_;
             // Raw Bob has already doubled fps_num in its output configuration.
             output_config.filter.bob = false;
-            mux_ = std::make_unique<ContainerOutput>(output_config, info, info.video_format);
+            mux_ = std::make_unique<ContainerOutput>(output_config, info, info.video_format, cancelled_);
         }
         mux_->append_video(sample);
         ++frames_;
@@ -64,6 +65,7 @@ public:
     [[nodiscard]] bool timestamps_csv() const { return static_cast<bool>(elementary_); }
 private:
     const EncodeConfig& config_;
+    const volatile std::sig_atomic_t& cancelled_;
     std::unique_ptr<BitstreamOutput> elementary_;
     std::unique_ptr<ContainerOutput> mux_;
     std::int64_t frames_ = 0;
@@ -212,7 +214,7 @@ private:
 
 EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const volatile std::sig_atomic_t& cancelled) {
     const auto output_config = raw_bob_output_config(config);
-    RawOutput output(output_config);
+    RawOutput output(output_config, cancelled);
     OutputQueue queue;
     CompressionSession session;
     create_hardware_session(session, output_config.video, &OutputQueue::callback, &queue);
@@ -269,7 +271,7 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
     }
     RawSource source(config);
     if (config.filter.bob) return encode_raw_bob(config, source, cancelled);
-    RawOutput output(config);
+    RawOutput output(config, cancelled);
     OutputQueue queue; // Must outlive the session, including error/early-return teardown.
     CompressionSession session;
     create_hardware_session(session, config.video, &OutputQueue::callback, &queue);
