@@ -1,4 +1,5 @@
 #include "vtenc/encoder.hpp"
+#include "vtenc/status.hpp"
 #include "encoder_session.hpp"
 #include "media_io.hpp"
 #include "source_format.hpp"
@@ -105,7 +106,7 @@ public:
         }
         catch (...) { VTDecompressionSessionInvalidate(session_); CFRelease(session_); session_ = nullptr; throw; }
     }
-    catch (const std::runtime_error& error) { throw HardwareDecodeError(error.what()); }
+    catch (const std::runtime_error& error) { throw HardwareDecodeError(error); }
     ~HardwareDecoder() {
         if (session_) { VTDecompressionSessionInvalidate(session_); CFRelease(session_); }
     }
@@ -141,12 +142,12 @@ public:
         }
         return std::move(frame_);
     }
-    catch (const std::runtime_error& error) { throw HardwareDecodeError(error.what()); }
+    catch (const std::runtime_error& error) { throw HardwareDecodeError(error); }
     void finish() try {
         check_status(VTDecompressionSessionWaitForAsynchronousFrames(session_), "VTDecompressionSessionWaitForAsynchronousFrames");
         if (error_) std::rethrow_exception(error_);
         verify();
-    } catch (const std::runtime_error& error) { throw HardwareDecodeError(error.what()); }
+    } catch (const std::runtime_error& error) { throw HardwareDecodeError(error); }
 private:
     void verify() {
         CFTypeRef raw = nullptr;
@@ -279,6 +280,7 @@ public:
         configure_hardware_encoder(session_.value, config_, encoder_input_format ? encoder_input_format->get() : input_.info().video_format);
         check_status(VTCompressionSessionPrepareToEncodeFrames(session_.value), "Prepare container video encoder");
         verify_hardware(session_.value);
+        if (config_.status) config_.status->session(config_, hardware_encoder_id(session_.value), true, CVPixelBufferGetPixelFormatType(pixel));
     }
     ~EncodedVideo() {
         // Invalidate before destroying callback state (session_ is otherwise destroyed last).
@@ -443,6 +445,11 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
     stdout_started = config.output == "-";
     ContainerOutput output(config, input.info(), CMSampleBufferGetFormatDescription(video->get()), cancelled);
     auto audio = input.read_audio();
+    const auto origin = CMSampleBufferGetPresentationTimeStamp(video->get());
+    const auto declared_total = input.info().video_range.duration;
+    const auto total = CMTIME_IS_NUMERIC(declared_total) && declared_total.value > 0
+        ? StatusTime{declared_total.value, declared_total.timescale} : StatusTime{};
+    std::uint64_t video_bytes = 0;
     std::int64_t video_count = 0;
     std::int64_t audio_count = 0;
     CMTime last_audio = kCMTimeInvalid;
@@ -461,11 +468,16 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
         } else {
             output.append_video(video->get());
             ++video_count;
+            video_bytes += CMSampleBufferGetTotalSampleSize(video->get());
+            const auto pts = CMSampleBufferGetPresentationTimeStamp(video->get());
+            const auto media = CMTimeSubtract(CMTimeAdd(pts, CMSampleBufferGetDuration(video->get())), origin);
+            if (config.status) config.status->advance(video_count, {pts.value, pts.timescale}, {media.value, media.timescale}, total, video_bytes);
             adopt(video, encoder.next());
         }
     }
     encoder.finish();
     if (cancelled) return {video_count, 0, true, audio_count};
+    if (config.status) config.status->check_diagnostics();
     const auto bytes = output.finish(cancelled);
     return {video_count, bytes, bytes == 0, audio_count, encoder.gpu_frames(), config.decode};
 }
@@ -474,17 +486,20 @@ EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_
     bool replayable = false;
     bool stdout_started = false;
     return with_decode_policy(config.decode, [&](DecodeMode mode) {
+        if (config.status) config.status->attempt(mode);
         auto attempt = config;
         attempt.decode = mode;
         return transcode_attempt(attempt, cancelled, replayable, stdout_started);
     }, [&](const HardwareDecodeError& error) {
         if (cancelled) throw MediaCancelled{};
-        if (stdout_started) throw std::runtime_error(std::string(error.what()) +
-            "; stdout muxing has started: cannot restart without corrupting the output; select --avsw in advance");
-        if (!replayable) throw std::runtime_error(std::string(error.what()) +
-            "; input is not seekable: cannot restart from the beginning; select --avsw before consuming it");
-        std::cerr << "vtenc: hardware decode failed: " << error.what()
-                  << "\nvtenc: restarting from the beginning with software decoding (one retry)\n";
+        if (stdout_started) throw MediaError(std::string(error.what()) +
+            "; stdout muxing has started: cannot restart without corrupting the output; select --avsw in advance", error.os_status);
+        if (!replayable) throw MediaError(std::string(error.what()) +
+            "; input is not seekable: cannot restart from the beginning; select --avsw before consuming it", error.os_status);
+        const auto message = "vtenc: hardware decode failed: " + std::string(error.what()) +
+            "; restarting from the beginning with software decoding (one retry)";
+        if (config.status) config.status->diagnostic(message, error.os_status);
+        else std::cerr << message << '\n';
     });
 } catch (const MediaCancelled&) {
     return {0, 0, true};

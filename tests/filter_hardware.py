@@ -64,8 +64,8 @@ def main():
         if matrix:
             expected_color["color_space"] = "smpte170m" if matrix == "bt601" else "bt709"
         record = verify(source, output, codec, depth, audio, size, expected_color)
-        require("Hardware verified: yes" in result.stdout and "Hardware decoder verified: yes" in result.stdout, "No hardware confirmation")
-        require(f"Metal GPU frames completed: {record['frames']}" in result.stdout, "Frames bypassed Metal")
+        require("Hardware verified: yes" in result.stderr and "Hardware decoder verified: yes" in result.stderr, "No hardware confirmation")
+        require(f"Metal GPU frames completed: {record['frames']}" in result.stderr, "Frames bypassed Metal")
         require(packets(probe(output), "video")[0].get("chroma_location") == "left", "Wrong output chroma location")
         record["psnr_db"] = quality(source, output, size, crop, depth, in_range, out_range, input_matrix, matrix)
         rss = re.search(r"(\d+)\s+maximum resident set size", result.stderr)

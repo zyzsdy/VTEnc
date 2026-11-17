@@ -37,7 +37,7 @@ target_compile_options(vtenc_options INTERFACE
     -Werror=unguarded-availability
     "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 
-add_library(vtenc_core STATIC src/core/command_line.cpp src/core/colorspace.cpp)
+add_library(vtenc_core STATIC src/core/command_line.cpp src/core/colorspace.cpp src/core/status.cpp)
 target_include_directories(vtenc_core PUBLIC include)
 target_link_libraries(vtenc_core PRIVATE vtenc_options)
 
@@ -89,6 +89,10 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" -DVTENC=$<TARGET_FILE:vtenc>
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake")
     set_tests_properties(vtenc.cli PROPERTIES LABELS "cli" TIMEOUT 15)
+    add_executable(vtenc_status_test tests/status_test.cpp)
+    target_link_libraries(vtenc_status_test PRIVATE vtenc_core vtenc_options)
+    add_test(NAME vtenc.status COMMAND vtenc_status_test)
+    set_tests_properties(vtenc.status PROPERTIES LABELS "status" TIMEOUT 15)
     add_executable(vtenc_decode_policy_test tests/decode_policy_test.cpp)
     target_include_directories(vtenc_decode_policy_test PRIVATE src/apple)
     target_link_libraries(vtenc_decode_policy_test PRIVATE vtenc_core vtenc_options)

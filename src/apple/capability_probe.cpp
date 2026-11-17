@@ -38,7 +38,7 @@ EncoderCapabilities probe_encoder(const ProbeConfig& config) {
     const auto count = CFDictionaryGetCount(properties.get());
     std::vector<const void*> keys(static_cast<std::size_t>(count));
     CFDictionaryGetKeysAndValues(properties.get(), keys.data(), nullptr);
-    EncoderCapabilities result{config, true, {}};
+    EncoderCapabilities result{config, true, {}, hardware_encoder_id(session.value)};
     for (const auto key : keys) {
         if (CFGetTypeID(key) != CFStringGetTypeID()) {
             throw std::runtime_error("VideoToolbox returned a non-string property key");

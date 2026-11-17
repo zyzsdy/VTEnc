@@ -1,4 +1,5 @@
 #include "vtenc/encoder.hpp"
+#include "vtenc/status.hpp"
 #include "encoder_session.hpp"
 #include "bitstream_output.hpp"
 #include "gpu_filter.hpp"
@@ -36,7 +37,7 @@ public:
         }
     }
     void append(CMSampleBufferRef sample) {
-        if (elementary_) { elementary_->append(sample); ++frames_; return; }
+        if (elementary_) { elementary_->append(sample); ++frames_; report(sample); return; }
         if (CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sample), CMTimeMake(frames_ * config_.fps_den, config_.fps_num)) != 0 ||
             CMTimeCompare(CMSampleBufferGetDuration(sample), CMTimeMake(config_.fps_den, config_.fps_num)) != 0) {
             throw std::runtime_error("Encoder changed the raw input timeline");
@@ -52,18 +53,29 @@ public:
         }
         mux_->append_video(sample);
         ++frames_;
+        report(sample);
     }
-    void publish(const volatile std::sig_atomic_t& cancelled) {
-        if (elementary_) elementary_->publish();
+    bool publish(const volatile std::sig_atomic_t& cancelled) {
+        if (cancelled) return false;
+        if (elementary_) { elementary_->publish(); return true; }
         else {
             if (!mux_) throw std::runtime_error("No encoded frames to mux");
             bytes_ = mux_->finish(cancelled);
+            return bytes_ != 0;
         }
     }
     [[nodiscard]] std::int64_t frames() const { return frames_; }
     [[nodiscard]] std::uint64_t bytes() const { return elementary_ ? elementary_->bytes() : bytes_; }
     [[nodiscard]] bool timestamps_csv() const { return static_cast<bool>(elementary_); }
 private:
+    void report(CMSampleBufferRef sample) {
+        video_bytes_ += CMSampleBufferGetTotalSampleSize(sample);
+        if (!config_.status) return;
+        const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
+        config_.status->advance(frames_, {pts.value, pts.timescale}, {frames_ * config_.fps_den, config_.fps_num},
+            {static_cast<std::int64_t>(config_.frames) * config_.fps_den, config_.fps_num}, video_bytes_);
+    }
+    std::uint64_t video_bytes_ = 0;
     const EncodeConfig& config_;
     const volatile std::sig_atomic_t& cancelled_;
     std::unique_ptr<BitstreamOutput> elementary_;
@@ -222,6 +234,7 @@ EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const
     check_status(VTCompressionSessionPrepareToEncodeFrames(session.value), "Prepare raw Bob hardware encoder");
     verify_hardware(session.value);
     const auto type = config.video.bit_depth == 10 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    if (config.status) config.status->session(output_config, hardware_encoder_id(session.value), false, type);
     auto pool = make_metal_pixel_pool(config.video.width, config.video.height, type);
     std::unique_ptr<GpuFilter> filter;
     std::int64_t submitted = 0;
@@ -255,8 +268,9 @@ EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const
     verify_hardware(session.value);
     if (cancelled) return {output.frames(), output.bytes(), true, 0, submitted};
     if (submitted != output_config.frames) throw std::runtime_error("Wrong Bob output count");
-    output.publish(cancelled);
-    return {output.frames(), output.bytes(), cancelled != 0, 0, submitted, DecodeMode::hardware, output.timestamps_csv()};
+    if (config.status) config.status->check_diagnostics();
+    const bool published = output.publish(cancelled);
+    return {output.frames(), output.bytes(), !published, 0, submitted, DecodeMode::hardware, output.timestamps_csv()};
 }
 
 
@@ -269,6 +283,7 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
         (config.quality && (!std::isfinite(*config.quality) || *config.quality < 0 || *config.quality > 1))) {
         throw std::invalid_argument("Invalid encoding configuration");
     }
+    if (config.status) config.status->attempt(DecodeMode::automatic, true);
     RawSource source(config);
     if (config.filter.bob) return encode_raw_bob(config, source, cancelled);
     RawOutput output(config, cancelled);
@@ -278,6 +293,8 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
     configure_hardware_encoder(session.value, config);
     check_status(VTCompressionSessionPrepareToEncodeFrames(session.value), "VTCompressionSessionPrepareToEncodeFrames");
     verify_hardware(session.value);
+    if (config.status) config.status->session(config, hardware_encoder_id(session.value), false, config.video.bit_depth == 10
+        ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
     std::int64_t submitted = 0;
     while (submitted < config.frames && !cancelled) {
         for (std::size_t i = 0; i < batch_size && submitted < config.frames && !cancelled; ++i) {
@@ -305,8 +322,9 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
     verify_hardware(session.value); // Verify again after actual frame encoding.
     if (cancelled) return {output.frames(), output.bytes(), true};
     if (output.frames() != config.frames) throw std::runtime_error("Encoded frame count differs from requested count");
-    output.publish(cancelled);
-    return {output.frames(), output.bytes(), cancelled != 0, 0, 0, DecodeMode::hardware, output.timestamps_csv()};
+    if (config.status) config.status->check_diagnostics();
+    const bool published = output.publish(cancelled);
+    return {output.frames(), output.bytes(), !published, 0, 0, DecodeMode::hardware, output.timestamps_csv()};
 }
 
 } // namespace vtenc

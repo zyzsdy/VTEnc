@@ -18,8 +18,12 @@
 - 文件转码将源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换传入封装器，精度与元数据保存取决于目标格式；支持 `hev1` 描述适配。
 - Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709/BT.2020 NCL/SMPTE 240M 矩阵转换，以及 `--vpp-colorspace` 线性光色域、传递函数转换，以及 Hable / Mobius / Reinhard / BT.2390 HDR→SDR tone mapping。
 - Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010、硬解或软解的文件输入。两个原始交错样片在本机无法硬解，可用软解接入 Metal Bob。
+- P4 `--json-status` 版本化 JSON Lines 能力、进度与终态协议，或普通终端实时进度；编码日志统一 stderr，stdout 可独占码流。
+- avformat 自动识别 Y4M 文件/stdin；显式 `--avsw` 接收 planar 4:2:0 8/10-bit，严格校验颜色解释、帧率、截断和 EOF。
 - 有界回调和重排队列、背压和排空；SIGINT 取消、失败清理、输出防覆盖。
 - 不依赖硬件编码器的 CLI / 码流适配检查，以及显式硬件集成验证脚本。
+
+P4 用法、JSON 字段、Y4M 颜色解释及生产者退出状态约定见 [P4 调用协议](docs/P4调用协议.md)，测试记录见 [P4 验证](docs/P4验证.md)。
 
 完整开发方案见 [docs/开发方案.md](docs/开发方案.md)。
 
@@ -71,7 +75,7 @@ cmake --install build/release --prefix "$PWD/build/install"
 
 能力探测固定使用 1920×1080 的 NV12 / P010 输入约束，设置对应 Profile，准备会话并核验 `UsingHardwareAcceleratedVideoEncoder`。它不提交帧，不验证真实码流，不代表最大分辨率、吞吐量或属性值组合均可用。硬件忙、配置不受支持等错误直接报告 OSStatus 并以非零状态退出，不降级到软件编码。
 
-退出码：`0` 成功、`1` 运行时或硬件错误、`2` 参数错误、`130` 用户取消。文件输出任务的结果写入 stdout，诊断写入 stderr。使用 `-o -` 时 stdout 只含媒体码流，结果、日志和诊断全部写入 stderr。文本结果尚不提供 JSON 协议。
+退出码：`0` 成功、`1` 运行时或硬件错误、`2` 参数错误、`130` 用户取消。所有编码任务的实时进度、结果、日志和诊断均写 stderr。使用 `-o -` 时 stdout 只含媒体码流；文件输出时 stdout 为空。`--json-status` 将能力查询、进度、诊断和终态写成逐行 JSON，供上层软件结构化读取。
 
 ## P1 硬件编码
 

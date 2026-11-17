@@ -144,7 +144,7 @@ def main():
     for name in ["file.mp4", "file.h264"]:
         output = directory / name
         result = run([binary, *raw, "-o", output])
-        require("Hardware verified: yes" in result.stdout and not result.stderr, "Changed file-mode logging")
+        require("Hardware verified: yes" in result.stderr and not result.stdout, "File-mode logs must use stderr")
         if name.endswith(".h264"):
             verify_elementary(output, "h264", 8, 320, 180, 17, Fraction(30000, 1001), 60)
         else:

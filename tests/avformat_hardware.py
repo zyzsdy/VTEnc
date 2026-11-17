@@ -90,11 +90,11 @@ def main():
         if not audio: options += ["--no-audio"]
         if bob: options += ["--deinterlace", "bob", "--field-order", "tff"]
         result = run([binary, *options, "-i", source, "-o", output, "--codec", codec, "--output-depth", depth])
-        require("Input demuxer: FFmpeg libavformat" in result.stdout and "Hardware verified: yes" in result.stdout, "Demux/hardware encoder confirmation missing")
+        require("Input demuxer: FFmpeg libavformat" in result.stderr and "Hardware verified: yes" in result.stderr, "Demux/hardware encoder confirmation missing")
         if mode == "--avhw":
-            require("Hardware decoder verified: yes" in result.stdout and "restarting" not in result.stderr, "--avhw used fallback")
+            require("Hardware decoder verified: yes" in result.stderr and "restarting" not in result.stderr, "--avhw used fallback")
         elif mode == "--avsw":
-            require("Software decoder: FFmpeg" in result.stdout and "restarting" not in result.stderr, "--avsw attempted hardware")
+            require("Software decoder: FFmpeg" in result.stderr and "restarting" not in result.stderr, "--avsw attempted hardware")
         records.append(verify(source, output, codec, depth, bob, audio))
         print(f"PASS {name}: {records[-1]['frames']} frames; exact video PTS; audio error {records[-1]['audio_max_pts_error']}", flush=True)
         return result

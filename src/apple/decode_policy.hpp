@@ -1,14 +1,16 @@
 #pragma once
 
 #include "vtenc/command_line.hpp"
+#include "vtenc/error.hpp"
 #include <stdexcept>
 
 namespace vtenc {
 
 // Only decoder operations may throw this; output/encoder/filter errors are fatal.
-class HardwareDecodeError : public std::runtime_error {
+class HardwareDecodeError : public MediaError {
 public:
-    using std::runtime_error::runtime_error;
+    using MediaError::MediaError;
+    explicit HardwareDecodeError(const std::exception& cause) : MediaError(cause.what(), native_status(cause)) {}
 };
 
 template <class Attempt, class Report>

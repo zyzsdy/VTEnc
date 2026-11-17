@@ -1,6 +1,13 @@
 #include "vtenc/capabilities.hpp"
 #include "vtenc/command_line.hpp"
 #include "vtenc/encoder.hpp"
+#include "vtenc/status.hpp"
+#include "vtenc/error.hpp"
+extern "C" {
+#include <libavutil/log.h>
+}
+#include <unistd.h>
+#include <algorithm>
 
 #include <exception>
 #include <csignal>
@@ -13,6 +20,38 @@
 #include <vector>
 
 namespace {
+vtenc::StatusReporter* active_reporter = nullptr;
+void ffmpeg_log(void* context, int level, const char* format, va_list args) noexcept {
+    if (level > av_log_get_level()) return;
+    char buffer[4096]{};
+    int prefix = 1;
+    const int size = av_log_format_line2(context, level, format, args, buffer, sizeof(buffer), &prefix);
+    if (size < 0) { if (active_reporter) active_reporter->diagnostic_failed(); return; }
+    try {
+        std::string text(buffer);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        if (size >= static_cast<int>(sizeof(buffer))) text += " [diagnostic truncated]";
+        if (active_reporter) active_reporter->diagnostic(text);
+    } catch (...) {
+        // Report on the scheduler thread, never unwind across FFmpeg's C ABI.
+        if (active_reporter) active_reporter->diagnostic_failed();
+    }
+}
+class Diagnostics {
+public:
+    explicit Diagnostics(vtenc::StatusReporter& reporter) : buffer_(reporter), original_(std::cerr.rdbuf(&buffer_)) {
+        active_reporter = &reporter;
+        av_log_set_callback(ffmpeg_log);
+    }
+    ~Diagnostics() {
+        av_log_set_callback(av_log_default_callback);
+        active_reporter = nullptr;
+        std::cerr.rdbuf(original_);
+    }
+private:
+    vtenc::DiagnosticBuffer buffer_;
+    std::streambuf* original_;
+};
 volatile std::sig_atomic_t interrupted = 0;
 extern "C" void handle_interrupt(int) { interrupted = 1; }
 class SignalHandler {
@@ -37,14 +76,18 @@ private:
 
 int main(int argc, char* argv[]) {
     bool stdout_output = false;
+    std::vector<std::string_view> args;
+    for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
+    const bool json = std::find(args.begin(), args.end(), "--json-status") != args.end();
+    std::ostream sink(std::cerr.rdbuf());
+    vtenc::StatusReporter reporter(json, sink, isatty(STDERR_FILENO));
+    Diagnostics diagnostics(reporter);
     try {
-        std::vector<std::string_view> args;
-        for (int i = 1; i < argc; ++i) args.emplace_back(argv[i]);
         vtenc::CommandLine options;
         try {
             options = vtenc::parse_command_line(args);
         } catch (const std::invalid_argument& error) {
-            std::cerr << "vtenc: " << error.what() << "\nRun vtenc --help for usage.\n";
+            reporter.failure(error.what(), 2);
             return 2;
         }
         switch (options.command) {
@@ -52,13 +95,16 @@ int main(int argc, char* argv[]) {
             std::cout << vtenc::help_text();
             break;
         case vtenc::Command::version:
-            std::cout << "VTEnc " << VTENC_VERSION << " (macOS arm64; VideoToolbox hardware encoder)\n";
+            if (json) reporter.event("version", "\"version\":" + vtenc::json_string(VTENC_VERSION) + ",\"platform\":\"macos-arm64\"");
+            else std::cout << "VTEnc " << VTENC_VERSION << " (macOS arm64; VideoToolbox hardware encoder)\n";
             break;
         case vtenc::Command::check_device:
             std::cout << vtenc::metal_device_name() << '\n';
             break;
         case vtenc::Command::check_features: {
             const auto capabilities = vtenc::probe_encoder(options.probe);
+            reporter.check_diagnostics();
+            if (json) { reporter.capabilities(capabilities, VTENC_VERSION); break; }
             std::cout << "VideoToolbox hardware session: " << vtenc::codec_name(capabilities.config.codec)
                       << ' ' << capabilities.config.bit_depth << "-bit "
                       << capabilities.config.width << 'x' << capabilities.config.height << '\n'
@@ -73,14 +119,18 @@ int main(int argc, char* argv[]) {
             // Report EPIPE through avformat instead of dying without a diagnostic.
             SignalHandler pipe_handler(SIGPIPE, SIG_IGN);
             stdout_output = options.encode.output == "-";
-            auto& log = stdout_output ? std::cerr : std::cout;
+            auto& log = std::cerr;
             const bool transcode = options.command == vtenc::Command::transcode;
+            options.encode.status = &reporter;
+            reporter.start(options.encode, transcode, VTENC_VERSION);
             const auto result = transcode ? vtenc::transcode_file(options.encode, interrupted)
                                           : vtenc::encode_video(options.encode, interrupted);
+            reporter.check_diagnostics();
             if (result.cancelled) {
                 std::cerr << "vtenc: cancelled; drained " << result.frames << " frames; "
                           << (stdout_output ? "stdout may contain incomplete output; written bytes cannot be retracted\n"
                                             : "incomplete output discarded\n");
+                reporter.finish(result);
                 return 130;
             }
             log << "Hardware verified: yes\nEncoded " << result.frames << " frames, " << result.bytes
@@ -93,17 +143,19 @@ int main(int argc, char* argv[]) {
                     << "Audio samples copied (first track): " << result.audio_samples << '\n';
             } else if (result.timestamps_csv) log << "Timestamps: " << options.encode.output << ".timestamps.csv\n";
             log << "Metal GPU frames completed: " << result.gpu_frames << '\n';
+            reporter.finish(result);
             break;
         }
         }
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << "vtenc: " << error.what() << '\n';
         if (interrupted) {
             std::cerr << (stdout_output ? "vtenc: cancelled; stdout may contain incomplete output; written bytes cannot be retracted\n"
                                        : "vtenc: cancelled; incomplete output discarded\n");
+            reporter.failure(error.what(), 130, vtenc::native_status(error));
             return 130;
         }
+        reporter.failure(error.what(), 1, vtenc::native_status(error));
         return 1;
     }
 }

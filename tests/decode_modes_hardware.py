@@ -28,9 +28,9 @@ def main():
     records = []
 
     def software(result):
-        require("Software decoder: FFmpeg libavcodec" in result.stdout, "Software decoding not reported")
-        require("Hardware decoder verified" not in result.stdout, "Software decode falsely reported as hardware")
-        require("Hardware verified: yes" in result.stdout, "Hardware encoder not verified")
+        require("Software decoder: FFmpeg libavcodec" in result.stderr, "Software decoding not reported")
+        require("Hardware decoder verified" not in result.stderr, "Software decode falsely reported as hardware")
+        require("Hardware verified: yes" in result.stderr, "Hardware encoder not verified")
 
     for codec in ["h264", "hevc", "av1"]:
         for depth in [8, 10]:
@@ -54,7 +54,7 @@ def main():
     for option in [[], ["--avhw"]]:
         output = directory / ("automatic.mp4" if not option else "forced-hw.mp4")
         result = run([binary, *option, "-i", vfr, "-o", output])
-        require("Hardware decoder verified: yes" in result.stdout and "restarting" not in result.stderr, "Hardware-first mode failed")
+        require("Hardware decoder verified: yes" in result.stderr and "restarting" not in result.stderr, "Hardware-first mode failed")
         records.append(verify(vfr, output, "h264", 8, True))
 
     for name in ["interlaced_tff_h264", "telecine_32_tff_h264"]:

@@ -1,18 +1,20 @@
 #pragma once
 
 #include "vtenc/command_line.hpp"
+#include "vtenc/error.hpp"
 #include "cf_ref.hpp"
 
 #include <VideoToolbox/VideoToolbox.h>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <cstring>
 
 namespace vtenc {
 
 inline void check_status(OSStatus status, const std::string& operation) {
     if (status != noErr) {
-        throw std::runtime_error(operation + " failed (OSStatus=" + std::to_string(status) + ")");
+        throw MediaError(operation + " failed (OSStatus=" + std::to_string(status) + ")", status);
     }
 }
 
@@ -70,6 +72,19 @@ inline void verify_hardware(VTCompressionSessionRef session) {
     if (CFGetTypeID(hardware.get()) != CFBooleanGetTypeID() || !CFEqual(hardware.get(), kCFBooleanTrue)) {
         throw std::runtime_error("VideoToolbox did not confirm hardware encoding; software fallback is forbidden");
     }
+}
+
+inline std::string hardware_encoder_id(VTCompressionSessionRef session) {
+    CFTypeRef raw = nullptr;
+    check_status(VTSessionCopyProperty(session, kVTCompressionPropertyKey_EncoderID, nullptr, &raw), "Read EncoderID");
+    CFRef value(raw);
+    if (!raw || CFGetTypeID(raw) != CFStringGetTypeID()) throw std::runtime_error("Missing hardware EncoderID");
+    auto string = static_cast<CFStringRef>(raw);
+    const auto size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(string), kCFStringEncodingUTF8) + 1;
+    std::string result(static_cast<std::size_t>(size), '\0');
+    if (!CFStringGetCString(string, result.data(), size, kCFStringEncodingUTF8)) throw std::runtime_error("Cannot read EncoderID");
+    result.resize(std::strlen(result.c_str()));
+    return result;
 }
 
 inline void configure_hardware_encoder(VTCompressionSessionRef session, const EncodeConfig& config, CMFormatDescriptionRef source_format = nullptr) {

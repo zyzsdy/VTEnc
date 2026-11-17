@@ -73,7 +73,10 @@ struct FilterConfig {
     bool requested = false;
 };
 
+class StatusReporter;
+
 struct EncodeConfig {
+    StatusReporter* status = nullptr; // Borrowed scheduler observer; never used in C callbacks.
     ProbeConfig video;
     DecodeMode decode = DecodeMode::automatic;
     FilterConfig filter;
@@ -90,6 +93,7 @@ struct EncodeConfig {
 };
 
 struct CommandLine {
+    bool json_status = false;
     Command command = Command::help;
     ProbeConfig probe;
     EncodeConfig encode;

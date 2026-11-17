@@ -71,7 +71,7 @@ def main():
         output = directory / name
         result = run([binary, "-i", source, "-o", output, "--codec", codec, "--output-depth", depth,
                       *options, *([] if audio else ["--no-audio"])])
-        require("Hardware verified: yes" in result.stdout, "Hardware encoder not verified")
+        require("Hardware verified: yes" in result.stderr, "Hardware encoder not verified")
         records.append(verify_output(output, codec, depth, expected(source), muxer, source if audio else None, elementary))
         print(f"PASS {name}: {records[-1]}", flush=True)
         return output
@@ -103,7 +103,7 @@ def main():
         output = directory / name
         result = run([binary, *(["-i", raw] if raw_input else ["--synthetic"]), "--input-res", "320x180",
                       "--frames", "8", "--fps", str(fps), "-o", output, *options])
-        require("Hardware verified: yes" in result.stdout, "Raw hardware encoder not verified")
+        require("Hardware verified: yes" in result.stderr, "Raw hardware encoder not verified")
         elementary = muxer == "h264"
         require(Path(str(output) + ".timestamps.csv").exists() == elementary, "Wrong CSV publication")
         if elementary:

@@ -55,7 +55,7 @@ def main():
     def encode(name,source,options,cycle=5):
         output=directory/(name+".mp4")
         result=run([binary,"-i",source,"-o",output,"--vpp-ivtc","cycle="+str(cycle),*options])
-        require("Hardware verified: yes" in result.stdout+result.stderr,"No confirmed hardware encoder")
+        require("Hardware verified: yes" in result.stderr,"No confirmed hardware encoder")
         stream,count=timeline(source,output,cycle)
         if "--output-depth" in options:
             require(stream["pix_fmt"]=="yuv420p10le" and stream["codec_name"]=="hevc","IVTC output codec/depth mismatch")

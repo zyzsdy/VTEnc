@@ -100,6 +100,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             else result.command = Command::check_features;
             continue;
         }
+        if (arg == "--json-status") { result.json_status = true; continue; }
         if (arg == "--synthetic") {
             synthetic = true;
             encode_options = true;
@@ -291,6 +292,8 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
     if (result.probe.codec == Codec::h264 && result.probe.bit_depth != 8) {
         throw std::invalid_argument("H.264 supports only 8-bit; use HEVC for 10-bit");
     }
+    if (result.json_status && (result.command == Command::help || result.command == Command::check_device))
+        throw std::invalid_argument("--json-status requires encoding, --version or --check-features");
     result.encode.video = result.probe;
     return result;
 }
@@ -315,6 +318,14 @@ Usage:
         --frames COUNT [-f FORMAT | --output-format FORMAT] [--codec h264|hevc] [--output-depth 8|10]
         [--fps NUM[/DEN]] [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
 
+--json-status: versioned JSON Lines on stderr, including diagnostics and terminal
+events; without it, live progress and all encoding logs also use stderr. Unknown
+duration has no percent or ETA. --version/--check-features also accept this flag.
+Y4M: use -i - --avsw, without --input-res; avformat auto-detects the stream.
+Supported layouts: planar 4:2:0 8-bit and 10-bit little-endian. Missing color
+interpretation requires --vpp-colorspace matrix/transfer/colorprim/range=FROM:auto
+and, for C420p10 without chroma metadata, --input-chroma-loc left|center|top-left.
+The caller must check producer exit status: clean EOF cannot reveal producer failure.
 Encoding defaults: h264, 8-bit, 30/1 fps, 5000 kbit/s average target, GOP limit 60.
 Input: tightly packed NV12 (8-bit) or P010 little-endian (10-bit in high bits),
 video range, BT.709 SDR. No raw pixel format or HDR conversion.

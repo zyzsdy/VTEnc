@@ -123,7 +123,7 @@ def main():
                        "--frames", count, "--fps", fps, "--codec", codec, "--output-depth", depth,
                        "--gop-len", 16, *( ["--bitrate", 2000] if synthetic else ["--quality", 0.7])]
             result = run(command)
-            require("Hardware verified: yes" in result.stdout, "No hardware confirmation")
+            require("Hardware verified: yes" in result.stderr, "No hardware confirmation")
             records.append(verify(output, codec, depth, width, height, count, fps, 16))
             print(f"PASS {name}: {count} frames, {records[-1]['profile']}, hardware + bitstream + timestamps", flush=True)
 

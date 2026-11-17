@@ -124,7 +124,7 @@ def main():
         source = args.samples / "decode" / f"{name}.mp4"
         output = directory / f"{name}.mp4"
         result = run([binary, "--avhw", "-i", source, "-o", output, "--codec", codec, "--output-depth", depth, "--no-audio"])
-        require("Hardware verified: yes" in result.stdout and "Hardware decoder verified: yes" in result.stdout, "No hardware confirmation")
+        require("Hardware verified: yes" in result.stderr and "Hardware decoder verified: yes" in result.stderr, "No hardware confirmation")
         records.append(verify(source, output, codec, depth, False))
         print(f"PASS {name}: {records[-1]['frames']} frames, exact PTS, hardware decode/encode", flush=True)
 
@@ -170,7 +170,7 @@ def main():
     require(not missing_output.exists(), "Published malformed container")
     depth_output = directory / "depth.mp4"
     converted = run([binary, "--avhw", "-i", args.samples / "decode/hevc_10bit.mp4", "-o", depth_output, "--no-audio"])
-    require("Metal GPU frames completed: 82" in converted.stdout, "Depth conversion bypassed Metal")
+    require("Metal GPU frames completed: 82" in converted.stderr, "Depth conversion bypassed Metal")
     records.append(verify(args.samples / "decode/hevc_10bit.mp4", depth_output, "h264", 8, False))
 
     cancelled = directory / "cancelled.mp4"

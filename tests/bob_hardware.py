@@ -131,7 +131,7 @@ def main():
         command = [binary, "-i", raw, "-o", elementary, "--input-res", "720x480", "--frames", 180, "--fps", "30000/1001",
                    "--deinterlace", "bob", "--field-order", order, "--codec", codec, "--output-depth", depth, "--quality", 0.9]
         result = run(["/usr/bin/time", "-l", *command])
-        require("Hardware verified: yes" in result.stdout and "Metal GPU frames completed: 360" in result.stdout, "No GPU/hardware confirmation")
+        require("Hardware verified: yes" in result.stderr and "Metal GPU frames completed: 360" in result.stderr, "No GPU/hardware confirmation")
         with Path(str(elementary) + ".timestamps.csv").open() as f:
             rows = list(csv.DictReader(f))
         require(len(rows) == 360, "Bob did not double raw frame count")
@@ -177,7 +177,7 @@ def main():
         output = directory / (name + ".mov")
         result = run([binary, "--avhw", "-i", source, "-o", output, "--deinterlace", "bob", "--field-order", "tff",
                       "--crop", "8,4,8,4", "--output-res", f"{size[0]}x{size[1]}", "--codec", "hevc", "--output-depth", 10])
-        require("Hardware decoder verified: yes" in result.stdout and f"Metal GPU frames completed: {count}" in result.stdout, "Hardware Bob pipeline not confirmed")
+        require("Hardware decoder verified: yes" in result.stderr and f"Metal GPU frames completed: {count}" in result.stderr, "Hardware Bob pipeline not confirmed")
         record = verify(source, output, "hevc", 10, True, size, bob=True)
         progressive(output, count)
         require(record["audio_packets"] > 0, "Bob audio test has no audio")

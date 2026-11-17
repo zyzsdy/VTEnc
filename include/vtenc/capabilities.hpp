@@ -11,6 +11,7 @@ struct EncoderCapabilities {
     ProbeConfig config;
     bool hardware;
     std::vector<std::string> property_names;
+    std::string encoder_id;
 };
 
 // Throws on any failure; never tries a software encoder.
