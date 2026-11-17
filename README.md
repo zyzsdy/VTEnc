@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-已实现 P1 硬编闭环和 P2 原生 MP4/MOV 文件转码。现有功能：
+已实现 P1 硬编闭环、P2 原生 MP4/MOV 文件转码，以及 P3 首批 GPU 缩放、裁剪和基础色彩转换。现有功能：
 
 - CMake / Ninja 的 Debug、Release 构建与安装目标。
 - 纯 C++ CLI、参数校验，以及独立的 Apple 框架适配库。
@@ -16,6 +16,7 @@
 - 平均码率目标或原生 Quality、GOP 上限、整数有理数帧率；Annex B 输出及逐帧时间戳 CSV。
 - MP4/MOV 压缩样本读取、显式 VideoToolbox 硬解、硬编和原生封装，默认复制第一条音轨。
 - 文件转码保留源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换；支持 `hev1` 描述适配。
+- Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709 YCbCr 矩阵转换。
 - 有界回调和重排队列、背压和排空；SIGINT 取消、失败清理、输出防覆盖。
 - 不依赖硬件编码器的 CLI / 码流适配检查，以及显式硬件集成验证脚本。
 
@@ -32,7 +33,7 @@ cd /Users/tedzy/Workspace/VTEnc
 ./scripts/bootstrap.sh
 ```
 
-`bootstrap.sh` 检查平台与工具并构建 Debug，不修改系统配置、不安装依赖、不自动运行测试。SDK 由 `xcode-select` / `xcrun` 选择，不在仓库中硬编码 SDK 路径。当前无需完整 Xcode；后续离线编译 Metal Shader 时再明确所需工具链。
+`bootstrap.sh` 检查平台与工具并构建 Debug，不修改系统配置、不安装依赖、不自动运行测试。SDK 由 `xcode-select` / `xcrun` 选择，不在仓库中硬编码 SDK 路径。当前无需完整 Xcode；Metal Shader 源码嵌入可执行文件，运行时编译，失败直接报错。
 
 也可以将构建工具安装到项目内隔离环境（本次环境初始化采用此方式）：
 
@@ -107,7 +108,7 @@ python3 tests/encode_hardware.py --vtenc build/dev/vtenc
 # H.264 输出，默认复制第一条音轨（也可以显式写 --audio-copy）
 ./build/dev/vtenc -i input.mp4 -o build/output.mov --codec h264 --bitrate 5000
 
-# 10-bit 输入保持位深，输出 HEVC Main10；不做 10 → 8-bit 转换
+# 10-bit 输入保持位深，输出 HEVC Main10
 ./build/dev/vtenc -i input10.mov -o build/output10.mp4 --codec hevc --output-depth 10
 
 # video_samples 中的 VFR / AAC 完整转码
@@ -129,11 +130,41 @@ python3 tests/transcode_hardware.py --vtenc build/dev/vtenc
 
 音频由 `AVAssetReaderTrackOutput(outputSettings:nil)` 读取压缩数据，`AVAssetWriterInput(outputSettings:nil)` 封装复制，不进行音频重编码。默认选择第一条音轨；`--no-audio` 显式禁用。保留原生 AAC priming、尾部裁剪和编辑映射，音视频共用电影时间原点，不分别归零。轨道配置变化、不兼容容器、重复音频 PTS、无法精确表示的时间基等问题直接失败。
 
-当前限定一个逐行 SDR 视频轨；不支持 HDR / Dolby Vision、交错、位深或尺寸转换、音频转码、多音轨选择、字幕、章节与附件。显示旋转仅保留容器变换，不修改像素。支持单段正常速率的视频编辑映射；不实现用户裁剪、变速或复杂编辑列表。对旧文件因声明时长舍入而落在末尾边界外的完整视频帧予以保留，不以粗粒度声明时长截断码流；显著裁剪存储视频帧的编辑映射会报错。
+当前限定一个逐行 SDR 视频轨；P3 已加入下述位深、尺寸和基础色彩转换。不支持 HDR / Dolby Vision、交错、音频转码、多音轨选择、字幕、章节与附件。显示旋转仅保留容器变换，不修改像素。支持单段正常速率的视频编辑映射；不实现时间裁剪（Trim）、变速或复杂编辑列表。对旧文件因声明时长舍入而落在末尾边界外的完整视频帧予以保留，不以粗粒度声明时长截断码流；显著裁剪存储视频帧的编辑映射会报错。
 
 取消或运行错误不发布成品，临时输出目录自动清理；成功结束封装后以不覆盖既有文件的方式发布。写出背压和封装完成等待均检查取消与错误，并对 30 秒无进展报错。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
 
 已使用 `video_samples` 的全部 13 个原始样片实施正向转码或明确拒绝检查，另以无重编码派生 MOV 验证输入容器和旋转。9 个成功转码用例的码流和时间轴均通过独立检查，VFR 音轨逐包哈希、PTS 和解码 PCM 完全一致。详见 [P2 验证记录](docs/P2验证.md)。
+
+## P3 GPU 缩放、裁剪与基础色彩转换
+
+```bash
+# 在存储像素坐标裁去左/上/右/下边缘，再缩放；同时将 10-bit 转成 8-bit
+./build/dev/vtenc -i tests/video_samples/decode/hevc_10bit.mp4 \
+  -o build/scaled.mp4 --crop 16,8,16,8 --output-res 640x352 --no-audio
+
+# 明确指定源矩阵解释，转换为 BT.601 系数、full range、HEVC Main10
+./build/dev/vtenc -i tests/video_samples/decode/h264_8bit.mp4 \
+  -o build/color.mp4 --input-matrix bt709 --output-matrix bt601 \
+  --output-range full --codec hevc --output-depth 10 --no-audio
+
+# 显式执行相关检查；硬件检查不会注册到默认 CTest
+ctest --preset dev -R '^vtenc.cli$'
+./build/dev/vtenc_gpu_filter_test
+python3 tests/filter_hardware.py --vtenc build/dev/vtenc
+```
+
+这些滤镜仅用于 MP4/MOV 文件模式。处理顺序是裁剪、双线性采样、YCbCr 矩阵 / range / 位深转换。`--crop LEFT,TOP,RIGHT,BOTTOM` 是四个非负偶数边距，必须留有正偶数宽高；坐标基于未应用容器旋转的存储像素。省略 `--output-res` 时输出裁剪后的尺寸，显式指定时精确拉伸到目标偶数宽高，保留源像素宽高比，不自动补黑边。几何变换后 clean aperture 重置为完整输出栅格；容器显示方向保持，平移按新尺寸调整。
+
+`--output-depth` 决定文件输出位深，默认仍为 8；10-bit 文件输入配合默认参数现在会通过 Metal 转成 8-bit。`--output-range limited|full` 默认保留源范围。`--output-matrix bt601|bt709` 默认保留源矩阵，只改变 YCbCr 系数，不改变 primaries / transfer，也不是完整 BT.601/BT.709 色域转换。`--input-matrix` 明确覆盖源矩阵解释；当转换需要矩阵但解码缓冲区和格式描述未提供支持的值时必须指定，不按尺寸猜测。
+
+支持 left、center、top-left 输入色度位置，Metal 输出统一重采样为 left。优先读取解码缓冲区 / 格式描述；缺失或不支持时需要 `--input-chroma-loc left|center|top-left` 明确解释。转换后的实际码流位深、range、颜色和色度标记会核查，不能仅修改标签冒充转换。
+
+GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理路径不锁定或复制 CPU 像素，无 CPU 滤镜回退。每帧等待 Metal 命令成功完成后提交硬编，保留原 PTS / duration，输出缓冲池最多 3 个。stdout 的 `Metal GPU frames completed` 统计成功提交硬编的已完成 GPU 帧；无需滤镜且位深相同时为 0。
+
+当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持 HDR、tone mapping、色域 / 传递函数转换、物理旋转、Bicubic/Lanczos、字幕合成和反交错。这些仍属于后续工作。
+
+2026-11-17 已在本机完成 240 组 GPU 逐像素参考比对、`video_samples` 的 11 个成功转码用例和 6 个拒绝用例，以及 P2 回归；详见 [P3 验证记录](docs/P3验证.md)。结果不代表其他硬件、系统或任意尺寸已验证，也不承诺零拷贝或长期吞吐量。
 
 ## 代码布局
 

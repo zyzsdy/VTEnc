@@ -66,7 +66,9 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         }
         const bool common = arg == "--codec" || arg == "--output-depth";
         if (!common && arg != "-i" && arg != "-o" && arg != "--input-res" && arg != "--fps" &&
-            arg != "--frames" && arg != "--gop-len" && arg != "--bitrate" && arg != "--quality") {
+            arg != "--frames" && arg != "--gop-len" && arg != "--bitrate" && arg != "--quality" &&
+            arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
+            arg != "--input-matrix" && arg != "--output-matrix" && arg != "--input-chroma-loc") {
             throw std::invalid_argument("Unknown argument: " + std::string(arg));
         }
         encode_options |= !common;
@@ -84,14 +86,48 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             else throw std::invalid_argument("--output-depth must be 8 or 10");
         } else if (arg == "-i") result.encode.input = value;
         else if (arg == "-o") result.encode.output = value;
-        else if (arg == "--input-res") {
-            const auto split = value.find('x');
-            if (split == std::string_view::npos) throw std::invalid_argument("--input-res requires WIDTHxHEIGHT");
-            result.probe.width = positive_integer(value.substr(0, split), arg);
-            result.probe.height = positive_integer(value.substr(split + 1), arg);
-            if (result.probe.width % 2 || result.probe.height % 2) {
-                throw std::invalid_argument("--input-res requires even width and height for 4:2:0");
+        else if (arg == "--output-range") {
+            result.encode.filter.requested = true;
+            if (value == "limited") result.encode.filter.range = ColorRange::limited;
+            else if (value == "full") result.encode.filter.range = ColorRange::full;
+            else throw std::invalid_argument("--output-range requires limited or full");
+        } else if (arg == "--input-matrix" || arg == "--output-matrix") {
+            result.encode.filter.requested = true;
+            auto& matrix = arg == "--input-matrix" ? result.encode.filter.input_matrix : result.encode.filter.output_matrix;
+            if (value == "bt601") matrix = ColorMatrix::bt601;
+            else if (value == "bt709") matrix = ColorMatrix::bt709;
+            else throw std::invalid_argument(std::string(arg) + " requires bt601 or bt709");
+        } else if (arg == "--input-chroma-loc") {
+            result.encode.filter.requested = true;
+            if (value == "left") result.encode.filter.input_chroma = ChromaLocation::left;
+            else if (value == "center") result.encode.filter.input_chroma = ChromaLocation::center;
+            else if (value == "top-left") result.encode.filter.input_chroma = ChromaLocation::top_left;
+            else throw std::invalid_argument("--input-chroma-loc requires left, center or top-left");
+        } else if (arg == "--crop") {
+            result.encode.filter.requested = true;
+            auto rest = value;
+            for (std::size_t n = 0; n < 4; ++n) {
+                const auto split = rest.find(',');
+                const auto part = rest.substr(0, split);
+                int number = 0;
+                const auto [end, error] = std::from_chars(part.data(), part.data() + part.size(), number);
+                if (error != std::errc{} || end != part.data() + part.size() || number < 0 || number % 2 ||
+                    (n < 3) != (split != std::string_view::npos)) {
+                    throw std::invalid_argument("--crop requires four nonnegative even margins: LEFT,TOP,RIGHT,BOTTOM");
+                }
+                result.encode.filter.crop[n] = number;
+                if (n < 3) rest.remove_prefix(split + 1);
             }
+        } else if (arg == "--input-res" || arg == "--output-res") {
+            const auto split = value.find('x');
+            if (split == std::string_view::npos) throw std::invalid_argument(std::string(arg) + " requires WIDTHxHEIGHT");
+            const int width = positive_integer(value.substr(0, split), arg);
+            const int height = positive_integer(value.substr(split + 1), arg);
+            if (width % 2 || height % 2) {
+                throw std::invalid_argument(std::string(arg) + " requires even width and height for 4:2:0");
+            }
+            if (arg == "--input-res") { result.probe.width = width; result.probe.height = height; }
+            else { result.encode.filter.output_size = {width, height}; result.encode.filter.requested = true; }
         } else if (arg == "--fps") {
             const auto split = value.find('/');
             result.encode.fps_num = positive_integer(value.substr(0, split), arg);
@@ -141,12 +177,13 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
                 throw std::invalid_argument("Container transcoding requires an .mp4 or .mov output");
             }
             if (seen.contains("--input-res") || seen.contains("--frames") || seen.contains("--fps")) {
-                throw std::invalid_argument("Container transcoding preserves source dimensions/timing; --input-res, --frames and --fps are raw-only");
+                throw std::invalid_argument("Container transcoding reads source dimensions/timing; --input-res, --frames and --fps are raw-only");
             }
             if (seen.contains("--audio-copy") && seen.contains("--no-audio")) {
                 throw std::invalid_argument("--audio-copy and --no-audio are mutually exclusive");
             }
         } else {
+            if (result.encode.filter.requested) throw std::invalid_argument("GPU filters require MP4/MOV input");
             if (!seen.contains("--input-res")) throw std::invalid_argument("Encoding requires --input-res WIDTHxHEIGHT");
             if (!seen.contains("--frames")) throw std::invalid_argument("Encoding requires --frames COUNT");
             if (seen.contains("--audio-copy") || seen.contains("--no-audio")) {
@@ -176,6 +213,9 @@ Usage:
   vtenc --check-features [--codec h264|hevc] [--output-depth 8|10]
   vtenc -i input.mp4|input.mov -o output.mp4|output.mov
         [--codec h264|hevc] [--output-depth 8|10] [--audio-copy | --no-audio]
+        [--crop LEFT,TOP,RIGHT,BOTTOM] [--output-res WIDTHxHEIGHT]
+        [--output-range limited|full] [--output-matrix bt601|bt709]
+        [--input-matrix bt601|bt709] [--input-chroma-loc left|center|top-left]
         [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
         --frames COUNT [--codec h264|hevc] [--output-depth 8|10]
@@ -192,7 +232,13 @@ SIGINT drains submitted frames and discards the incomplete output (exit 130).
 Feature probing creates a hardware-only 1920x1080 VideoToolbox session.
 Listed properties are not validated value combinations; the probe encodes no frames.
 MP4/MOV: hardware-only decode and encode, first audio track copied by default.
-Source dimensions, PTS, VFR and display transform are preserved. No depth conversion.
+PTS, VFR and display orientation are preserved. GPU filters use Metal only.
+Crop uses even margins in stored pixels, then bilinear resize to even output size.
+Output pixel aspect ratio is preserved; explicit output size may stretch the image.
+8/10-bit and range conversion are supported; depth follows --output-depth (default 8).
+Matrix conversion changes YCbCr coefficients only, preserving primaries and transfer.
+Missing matrix/chroma metadata requires an explicit input override when needed.
+No gamut/transfer conversion, tone mapping, dithering or antialiasing downscale.
 SDR progressive video only; HDR, Dolby Vision and interlaced input are rejected.
 Exit codes: 0 success, 1 runtime/hardware failure, 2 invalid arguments, 130 cancelled.
 )";

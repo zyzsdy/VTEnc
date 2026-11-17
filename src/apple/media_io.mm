@@ -236,7 +236,13 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
         state.video.expectsMediaDataInRealTime = NO;
         state.video.mediaTimeScale = info.video_timescale;
         const auto& t = info.transform;
-        state.video.transform = CGAffineTransformMake(t[0], t[1], t[2], t[3], t[4], t[5]);
+        const auto source_size = CMVideoFormatDescriptionGetDimensions(info.video_format);
+        const auto output_size = CMVideoFormatDescriptionGetDimensions(format);
+        // Keep the transformed bounding-box origin when the stored raster changes size.
+        const auto min_x = [&](CMVideoDimensions size) { return std::min(0.0, t[0] * size.width) + std::min(0.0, t[2] * size.height); };
+        const auto min_y = [&](CMVideoDimensions size) { return std::min(0.0, t[1] * size.width) + std::min(0.0, t[3] * size.height); };
+        state.video.transform = CGAffineTransformMake(t[0], t[1], t[2], t[3],
+            t[4] + min_x(source_size) - min_x(output_size), t[5] + min_y(source_size) - min_y(output_size));
         if (![state.writer canAddInput:state.video]) throw std::runtime_error("Container does not accept encoded video format");
         [state.writer addInput:state.video];
         auto movie_scale = static_cast<std::int64_t>(info.video_timescale);

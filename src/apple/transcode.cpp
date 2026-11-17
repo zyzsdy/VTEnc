@@ -2,6 +2,7 @@
 #include "encoder_session.hpp"
 #include "media_io.hpp"
 #include "source_format.hpp"
+#include "gpu_filter.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -72,9 +73,11 @@ public:
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
         const auto pixel_format = static_cast<std::int32_t>(source_pixel_format(format));
         CFRef pixel_number(CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pixel_format));
-        const void* pixel_keys[] = {kCVPixelBufferPixelFormatTypeKey};
-        const void* pixel_values[] = {pixel_number.get()};
-        CFRef attributes(CFDictionaryCreate(kCFAllocatorDefault, pixel_keys, pixel_values, 1,
+        CFRef surface(CFDictionaryCreate(kCFAllocatorDefault, nullptr, nullptr, 0,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+        const void* pixel_keys[] = {kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferIOSurfacePropertiesKey};
+        const void* pixel_values[] = {pixel_number.get(), kCFBooleanTrue, surface.get()};
+        CFRef attributes(CFDictionaryCreate(kCFAllocatorDefault, pixel_keys, pixel_values, 3,
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
         VTDecompressionOutputCallbackRecord callback{&receive, this};
         check_status(VTDecompressionSessionCreate(kCFAllocatorDefault, format_.get(), specification.get(), attributes.get(),
@@ -217,17 +220,22 @@ public:
             return;
         }
         auto pixel = current_->pixel.get();
-        const auto pixel_format = CVPixelBufferGetPixelFormatType(pixel);
-        int depth = 0;
-        if (pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange || pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) depth = 8;
-        if (pixel_format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || pixel_format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange) depth = 10;
-        if (!depth) throw std::runtime_error("Decoder returned unsupported native pixel format=" + std::to_string(pixel_format));
-        if (depth != config_.video.bit_depth) throw std::runtime_error("P2 does not convert bit depth; source is " + std::to_string(depth) + "-bit; set matching --codec/--output-depth");
         const auto dimensions = CMVideoFormatDescriptionGetDimensions(input_.info().video_format);
         config_.video.width = dimensions.width;
         config_.video.height = dimensions.height;
-        create_hardware_session(session_, config_.video, &receive, this, pixel_format);
-        configure_hardware_encoder(session_.value, config_, input_.info().video_format);
+        std::optional<CFRef<CMVideoFormatDescriptionRef>> filtered_format;
+        if (needs_gpu_filter(config_, pixel)) {
+            filter_ = std::make_unique<GpuFilter>(make_filter_plan(config_, input_.info().video_format, pixel));
+            filtered_.emplace(filter_->process(pixel));
+            pixel = filtered_->get();
+            config_.video.width = static_cast<int>(CVPixelBufferGetWidth(pixel));
+            config_.video.height = static_cast<int>(CVPixelBufferGetHeight(pixel));
+            CMVideoFormatDescriptionRef raw = nullptr;
+            check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixel, &raw), "Describe filtered frame");
+            filtered_format.emplace(raw);
+        }
+        create_hardware_session(session_, config_.video, &receive, this, CVPixelBufferGetPixelFormatType(pixel));
+        configure_hardware_encoder(session_.value, config_, filtered_format ? filtered_format->get() : input_.info().video_format);
         check_status(VTCompressionSessionPrepareToEncodeFrames(session_.value), "Prepare container video encoder");
         verify_hardware(session_.value);
     }
@@ -243,6 +251,11 @@ public:
         require_time(duration, "video frame duration");
         if (CMTimeCompare(duration, kCMTimeZero) <= 0) throw std::runtime_error("Video frame duration must be positive");
         auto pixel = current_->pixel.get();
+        if (filter_) {
+            if (!filtered_) filtered_.emplace(filter_->process(pixel));
+            pixel = filtered_->get();
+            ++gpu_frames_;
+        }
         if (CVPixelBufferGetWidth(pixel) != static_cast<std::size_t>(config_.video.width) ||
             CVPixelBufferGetHeight(pixel) != static_cast<std::size_t>(config_.video.height)) {
             throw std::runtime_error("Decoder changed video dimensions");
@@ -263,10 +276,29 @@ public:
         if (dimensions.width != config_.video.width || dimensions.height != config_.video.height) {
             throw std::runtime_error("Encoder changed source dimensions");
         }
+        if (filter_) {
+            const auto format = CMSampleBufferGetFormatDescription(output_->get());
+            if (source_pixel_format(format) != CVPixelBufferGetPixelFormatType(pixel)) {
+                throw std::runtime_error("Encoder changed filtered bit depth or color range");
+            }
+            for (const auto key : {kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey}) {
+                if (const auto raw = CVBufferCopyAttachment(pixel, key, nullptr)) {
+                    CFRef expected(raw);
+                    const auto actual = CMFormatDescriptionGetExtension(format, key);
+                    if (!actual || !CFEqual(actual, expected.get())) throw std::runtime_error("Encoder changed filtered color metadata");
+                }
+            }
+            // H.264/HEVC default chroma siting is left when the location is omitted.
+            if (const auto location = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_ChromaLocationTopField)) {
+                if (!CFEqual(location, kCMFormatDescriptionChromaLocation_Left)) throw std::runtime_error("Encoder changed filtered chroma location");
+            }
+        }
+        filtered_.reset();
         current_ = std::move(following);
         CFRetain(output_->get());
         return output_->get();
     }
+    [[nodiscard]] std::int64_t gpu_frames() const { return gpu_frames_; }
     void finish() {
         if (session_.value) {
             check_status(VTCompressionSessionCompleteFrames(session_.value, kCMTimeInvalid), "Drain final transcoded frames");
@@ -286,6 +318,9 @@ private:
         } catch (...) { self.error_ = std::current_exception(); }
     }
     CompressionSession session_;
+    std::unique_ptr<GpuFilter> filter_;
+    std::optional<CFRef<CVPixelBufferRef>> filtered_;
+    std::int64_t gpu_frames_ = 0;
     ContainerInput& input_;
     EncodeConfig config_;
     DisplayFrames frames_;
@@ -387,7 +422,7 @@ EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_
     if (!video_ended) output.end_video();
     if (!audio_ended) output.end_audio();
     const auto bytes = output.finish(cancelled);
-    return {video_count, bytes, bytes == 0, audio_count};
+    return {video_count, bytes, bytes == 0, audio_count, encoder.gpu_frames()};
 } catch (const MediaCancelled&) {
     return {0, 0, true};
 }

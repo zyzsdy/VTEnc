@@ -46,7 +46,7 @@ def packets(data, kind):
     return stream, result
 
 
-def verify(source, output, codec, depth, copy_audio):
+def verify(source, output, codec, depth, copy_audio, expected_size=None, expected_color=None):
     before, after = probe(source), probe(output)
     src_video, src_packets = packets(before, "video")
     dst_video, dst_packets = packets(after, "video")
@@ -56,17 +56,18 @@ def verify(source, output, codec, depth, copy_audio):
     require(dst_video["codec_name"] == codec, "Wrong output codec")
     require(dst_video["profile"] == ("High" if codec == "h264" else "Main 10" if depth == 10 else "Main"), "Wrong profile")
     require(dst_video["pix_fmt"] == ("yuv420p10le" if depth == 10 else "yuv420p"), "Wrong output bit depth")
-    for key in ["width", "height"]:
-        require(src_video.get(key) == dst_video.get(key), f"Changed {key}")
+    expected_size = expected_size or (src_video["width"], src_video["height"])
+    require(tuple(dst_video[k] for k in ["width", "height"]) == tuple(expected_size), "Wrong output dimensions")
     sar = lambda stream: stream.get("sample_aspect_ratio", "1:1")
     require(sar(src_video) == sar(dst_video), "Changed sample aspect ratio")
     for key in ["color_range", "color_space", "color_transfer", "color_primaries"]:
-        if src_video.get(key) not in [None, "unknown"]:
+        expected = (expected_color or {}).get(key, src_video.get(key))
+        if expected not in [None, "unknown"]:
             # An omitted H.264 video_signal_type uses limited range by default.
             actual = dst_video.get(key)
             if key == "color_range" and actual in [None, "unknown"]:
                 actual = "tv"
-            require(src_video.get(key) == actual, f"Changed {key}")
+            require(expected == actual, f"Wrong {key}: expected {expected}, got {actual}")
     rotation = lambda stream: [x.get("rotation") for x in stream.get("side_data_list", []) if "rotation" in x]
     require(rotation(src_video) == rotation(dst_video), "Changed display transform")
     for index, packet in enumerate(dst_packets[:-1]):
@@ -160,8 +161,9 @@ def main():
     run([binary, "-i", truncated, "-o", missing_output], expected=1)
     require(not missing_output.exists(), "Published malformed container")
     depth_output = directory / "depth.mp4"
-    require("does not convert bit depth" in run([binary, "-i", args.samples / "decode/hevc_10bit.mp4", "-o", depth_output], expected=1).stderr,
-            "Silently converted bit depth")
+    converted = run([binary, "-i", args.samples / "decode/hevc_10bit.mp4", "-o", depth_output, "--no-audio"])
+    require("Metal GPU frames completed: 82" in converted.stdout, "Depth conversion bypassed Metal")
+    records.append(verify(args.samples / "decode/hevc_10bit.mp4", depth_output, "h264", 8, False))
 
     cancelled = directory / "cancelled.mp4"
     process = subprocess.Popen([str(binary), "-i", str(vfr), "-o", str(cancelled)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -190,7 +192,7 @@ def main():
     require(not list(directory.glob("*.part.*")), "Temporary container output leaked")
     report = {"system": platform.platform(), "encoder": run([binary, "--version"]).stdout.strip(),
               "cases": records, "rejections": rejected,
-              "error_checks": ["existing output", "truncated MP4", "depth mismatch", "SIGINT", "writer I/O failure"]}
+              "error_checks": ["existing output", "truncated MP4", "SIGINT", "writer I/O failure"]}
     (directory / "verification.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(f"PASS rejection/cancellation/write-failure checks; report: {directory / 'verification.json'}")
 

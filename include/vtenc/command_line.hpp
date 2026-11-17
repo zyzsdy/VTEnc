@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <span>
 #include <cstdint>
 #include <optional>
@@ -19,8 +20,23 @@ struct ProbeConfig {
     int height = 1080;
 };
 
+enum class ColorMatrix { automatic, bt601, bt709 };
+enum class ColorRange { automatic, limited, full };
+enum class ChromaLocation { automatic, left, center, top_left };
+
+struct FilterConfig {
+    std::optional<std::array<int, 2>> output_size;
+    std::array<int, 4> crop{}; // left, top, right, bottom in stored luma pixels.
+    ColorRange range = ColorRange::automatic;
+    ColorMatrix input_matrix = ColorMatrix::automatic;
+    ColorMatrix output_matrix = ColorMatrix::automatic;
+    ChromaLocation input_chroma = ChromaLocation::automatic;
+    bool requested = false;
+};
+
 struct EncodeConfig {
     ProbeConfig video;
+    FilterConfig filter;
     std::string input; // Empty means synthetic input; otherwise tightly packed NV12/P010 LE.
     std::string output;
     std::int32_t frames = 120;

@@ -1,0 +1,4 @@
+#pragma once
+namespace vtenc {
+inline constexpr char filter_shader_source[] = R"VTENC_METAL(@VTENC_GPU_SHADER@)VTENC_METAL";
+}
