@@ -73,7 +73,7 @@ int main(int argc, char* argv[]) {
                 std::cout << (result.decoder == vtenc::DecodeMode::hardware
                     ? "Hardware decoder verified: yes\n" : "Software decoder: FFmpeg libavcodec (libavformat demux)\n")
                     << "Audio samples copied (first track): " << result.audio_samples << '\n';
-            } else std::cout << "Timestamps: " << options.encode.output << ".timestamps.csv\n";
+            } else if (result.timestamps_csv) std::cout << "Timestamps: " << options.encode.output << ".timestamps.csv\n";
             std::cout << "Metal GPU frames completed: " << result.gpu_frames << '\n';
             break;
         }

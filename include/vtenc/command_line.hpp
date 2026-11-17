@@ -45,6 +45,7 @@ struct EncodeConfig {
     FilterConfig filter;
     std::string input; // Empty: synthetic. Raw jobs: NV12/P010 LE. Compressed jobs: avformat input.
     std::string output;
+    std::string output_format; // Empty: avformat guesses from the destination filename.
     std::int32_t frames = 120;
     std::int32_t fps_num = 30;
     std::int32_t fps_den = 1;

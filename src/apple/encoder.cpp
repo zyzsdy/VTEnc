@@ -3,6 +3,7 @@
 #include "bitstream_output.hpp"
 #include "gpu_filter.hpp"
 #include "bob.hpp"
+#include "ffmpeg_utils.hpp"
 
 #include <array>
 #include <atomic>
@@ -19,6 +20,55 @@
 
 namespace vtenc {
 namespace {
+
+// Preserve the raw elementary-stream CSV contract, while using avformat's
+// selection for every filename/override. Other muxers use the shared writer.
+class RawOutput {
+public:
+    explicit RawOutput(const EncodeConfig& config) : config_(config) {
+        const auto* format = config.output_format.empty()
+            ? av_guess_format(nullptr, config.output.c_str(), nullptr)
+            : av_guess_format(config.output_format.c_str(), nullptr, nullptr);
+        if (format && ((std::string_view(format->name) == "h264" && config.video.codec == Codec::h264) ||
+                       (std::string_view(format->name) == "hevc" && config.video.codec == Codec::hevc))) {
+            elementary_ = std::make_unique<BitstreamOutput>(config);
+        }
+    }
+    void append(CMSampleBufferRef sample) {
+        if (elementary_) { elementary_->append(sample); ++frames_; return; }
+        if (CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sample), CMTimeMake(frames_ * config_.fps_den, config_.fps_num)) != 0 ||
+            CMTimeCompare(CMSampleBufferGetDuration(sample), CMTimeMake(config_.fps_den, config_.fps_num)) != 0) {
+            throw std::runtime_error("Encoder changed the raw input timeline");
+        }
+        if (!mux_) {
+            MediaInfo info;
+            info.video_format = CMSampleBufferGetFormatDescription(sample);
+            info.video_timescale = config_.fps_num;
+            auto output_config = config_;
+            // Raw Bob has already doubled fps_num in its output configuration.
+            output_config.filter.bob = false;
+            mux_ = std::make_unique<ContainerOutput>(output_config, info, info.video_format);
+        }
+        mux_->append_video(sample);
+        ++frames_;
+    }
+    void publish(const volatile std::sig_atomic_t& cancelled) {
+        if (elementary_) elementary_->publish();
+        else {
+            if (!mux_) throw std::runtime_error("No encoded frames to mux");
+            bytes_ = mux_->finish(cancelled);
+        }
+    }
+    [[nodiscard]] std::int64_t frames() const { return frames_; }
+    [[nodiscard]] std::uint64_t bytes() const { return elementary_ ? elementary_->bytes() : bytes_; }
+    [[nodiscard]] bool timestamps_csv() const { return static_cast<bool>(elementary_); }
+private:
+    const EncodeConfig& config_;
+    std::unique_ptr<BitstreamOutput> elementary_;
+    std::unique_ptr<ContainerOutput> mux_;
+    std::int64_t frames_ = 0;
+    std::uint64_t bytes_ = 0;
+};
 
 // Submit at most this many frames, complete that batch, then consume on the caller thread.
 // The callback never blocks on I/O or queue capacity; outstanding frames bound both
@@ -54,7 +104,7 @@ public:
         default: throw std::runtime_error("Exception inside VideoToolbox callback");
         }
     }
-    void drain(BitstreamOutput& output) {
+    void drain(RawOutput& output) {
         // CompleteFrames guarantees all pending callbacks have returned.
         check();
         for (std::size_t i = 0; i < size_; ++i) {
@@ -162,7 +212,7 @@ private:
 
 EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const volatile std::sig_atomic_t& cancelled) {
     const auto output_config = raw_bob_output_config(config);
-    BitstreamOutput output(output_config);
+    RawOutput output(output_config);
     OutputQueue queue;
     CompressionSession session;
     create_hardware_session(session, output_config.video, &OutputQueue::callback, &queue);
@@ -203,8 +253,8 @@ EncodeResult encode_raw_bob(const EncodeConfig& config, RawSource& source, const
     verify_hardware(session.value);
     if (cancelled) return {output.frames(), output.bytes(), true, 0, submitted};
     if (submitted != output_config.frames) throw std::runtime_error("Wrong Bob output count");
-    output.publish();
-    return {output.frames(), output.bytes(), false, 0, submitted};
+    output.publish(cancelled);
+    return {output.frames(), output.bytes(), cancelled != 0, 0, submitted, DecodeMode::hardware, output.timestamps_csv()};
 }
 
 
@@ -219,7 +269,7 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
     }
     RawSource source(config);
     if (config.filter.bob) return encode_raw_bob(config, source, cancelled);
-    BitstreamOutput output(config);
+    RawOutput output(config);
     OutputQueue queue; // Must outlive the session, including error/early-return teardown.
     CompressionSession session;
     create_hardware_session(session, config.video, &OutputQueue::callback, &queue);
@@ -253,8 +303,8 @@ EncodeResult encode_video(const EncodeConfig& config, const volatile std::sig_at
     verify_hardware(session.value); // Verify again after actual frame encoding.
     if (cancelled) return {output.frames(), output.bytes(), true};
     if (output.frames() != config.frames) throw std::runtime_error("Encoded frame count differs from requested count");
-    output.publish();
-    return {output.frames(), output.bytes(), false};
+    output.publish(cancelled);
+    return {output.frames(), output.bytes(), cancelled != 0, 0, 0, DecodeMode::hardware, output.timestamps_csv()};
 }
 
 } // namespace vtenc

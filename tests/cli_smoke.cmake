@@ -55,7 +55,7 @@ check_cli(2 "^$" "requires --frames" ${file_job} --input-res 320x180)
 check_cli(2 "^$" "raw-only" ${file_job} --fps 30)
 check_cli(2 "^$" "raw-only" ${file_job} --frames 10)
 check_cli(2 "^$" "mutually exclusive" ${file_job} --audio-copy --no-audio)
-check_cli(2 "^$" "requires an .mp4 or .mov" -i input.mp4 -o output.hevc)
+check_cli(1 "^$" "avformat_open_input" -i missing-input.mp4 -o output.hevc)
 check_cli(2 "^$" "Audio options require" ${job} --audio-copy)
 check_cli(2 "^$" "Audio options require" ${job} --no-audio)
 
@@ -103,3 +103,14 @@ check_cli(1 "^$" "avformat_open_input" -i missing-input.mkv -o output.mp4 --avhw
 check_cli(1 "^$" "avformat_open_input" -i missing-input.ts -o output.mp4 --avsw)
 check_cli(1 "^$" "avformat_open_input" -i missing-input.unlisted -o output.mov)
 check_cli(1 "^$" "avformat_open_input" -i missing-input -o output.mov)
+
+# Muxer override aliases share one option and accept arbitrary names for avformat.
+check_cli(0 "--output-format" "^$" --help)
+check_cli(2 "^$" "Missing value" ${file_job} -f)
+check_cli(2 "^$" "Missing value" ${file_job} --output-format)
+check_cli(2 "^$" "Missing value" ${file_job} -f -o wrong)
+check_cli(2 "^$" "Duplicate option" ${file_job} -f mp4 --output-format matroska)
+check_cli(2 "^$" "Duplicate option" ${file_job} --output-format mp4 -f matroska)
+check_cli(2 "^$" "cannot be combined" --help -f mp4)
+check_cli(1 "^$" "avformat_open_input" -i missing-input -o out.unknown -f matroska)
+check_cli(1 "^$" "avformat_open_input" -i missing-input -o no-extension --output-format mpegts)

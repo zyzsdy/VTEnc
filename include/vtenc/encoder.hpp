@@ -14,9 +14,10 @@ struct EncodeResult {
     std::int64_t audio_samples = 0;
     std::int64_t gpu_frames = 0;
     DecodeMode decoder = DecodeMode::hardware;
+    bool timestamps_csv = false;
 };
 
-// Hardware only. Publishes Annex B and <output>.timestamps.csv on success.
+// Hardware only. Muxer selected by filename/override; raw elementary output also publishes a timestamps CSV.
 // On cancellation drains submitted frames, discards temporary files, and returns cancelled.
 [[nodiscard]] EncodeResult encode_video(const EncodeConfig& config,
     const volatile std::sig_atomic_t& cancelled);

@@ -2,9 +2,6 @@
 
 #include <charconv>
 #include <cmath>
-#include <filesystem>
-#include <algorithm>
-#include <cctype>
 #include <limits>
 #include <numeric>
 #include <locale>
@@ -44,6 +41,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (arg == "-h") arg = "--help";
         if (arg == "--input") arg = "-i";
         if (arg == "--output") arg = "-o";
+        if (arg == "-f") arg = "--output-format";
         if (!seen.insert(arg).second) throw std::invalid_argument("Duplicate option: " + std::string(arg));
         if (arg == "--help" || arg == "--version" || arg == "--check-device" || arg == "--check-features") {
             if (has_command) throw std::invalid_argument("Specify exactly one command");
@@ -70,7 +68,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             continue;
         }
         const bool common = arg == "--codec" || arg == "--output-depth";
-        if (!common && arg != "-i" && arg != "-o" && arg != "--input-res" && arg != "--fps" &&
+        if (!common && arg != "--output-format" && arg != "-i" && arg != "-o" && arg != "--input-res" && arg != "--fps" &&
             arg != "--frames" && arg != "--gop-len" && arg != "--bitrate" && arg != "--quality" &&
             arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
             arg != "--input-matrix" && arg != "--output-matrix" && arg != "--input-chroma-loc" && arg != "--deinterlace" && arg != "--field-order") {
@@ -91,7 +89,10 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             else throw std::invalid_argument("--output-depth must be 8 or 10");
         } else if (arg == "-i") result.encode.input = value;
         else if (arg == "-o") result.encode.output = value;
-        else if (arg == "--deinterlace") {
+        else if (arg == "--output-format") {
+            if (value.starts_with("-")) throw std::invalid_argument("Missing value for --output-format");
+            result.encode.output_format = value;
+        } else if (arg == "--deinterlace") {
             if (value != "bob") throw std::invalid_argument("--deinterlace supports only bob");
             result.encode.filter.bob = true;
         } else if (arg == "--field-order") {
@@ -183,19 +184,10 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (result.encode.output.empty() || result.encode.output == "-") {
             throw std::invalid_argument("Encoding requires -o output-file (stdout is not supported)");
         }
-        const auto extension = [](const std::string& path) {
-            auto ext = std::filesystem::path(path).extension().string();
-            std::ranges::transform(ext, ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return ext;
-        };
         // Compressed input is probed by avformat, independent of its extension.
         // --input-res explicitly selects the existing tightly packed raw path.
         if (!synthetic && !seen.contains("--input-res")) {
             result.command = Command::transcode;
-            const auto output_ext = extension(result.encode.output);
-            if (output_ext != ".mp4" && output_ext != ".mov") {
-                throw std::invalid_argument("Container transcoding requires an .mp4 or .mov output");
-            }
             if (seen.contains("--frames") || seen.contains("--fps")) {
                 throw std::invalid_argument("Container transcoding reads source dimensions/timing; --input-res, --frames and --fps are raw-only");
             }
@@ -243,7 +235,7 @@ Usage:
   vtenc --version
   vtenc --check-device
   vtenc --check-features [--codec h264|hevc] [--output-depth 8|10]
-  vtenc -i input-file -o output.mp4|output.mov
+  vtenc -i input-file -o output-file [-f FORMAT | --output-format FORMAT]
         [--avhw | --avsw]
         [--codec h264|hevc] [--output-depth 8|10] [--audio-copy | --no-audio]
         [--crop LEFT,TOP,RIGHT,BOTTOM] [--output-res WIDTHxHEIGHT]
@@ -252,7 +244,7 @@ Usage:
         [--deinterlace bob] [--field-order auto|tff|bff]
         [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
-        --frames COUNT [--codec h264|hevc] [--output-depth 8|10]
+        --frames COUNT [-f FORMAT | --output-format FORMAT] [--codec h264|hevc] [--output-depth 8|10]
         [--fps NUM[/DEN]] [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
 
 Encoding defaults: h264, 8-bit, 30/1 fps, 5000 kbit/s average target, GOP limit 60.
@@ -262,14 +254,18 @@ Raw Bob: add --deinterlace bob --field-order tff|bff; --fps and --frames describ
 input frame pairs, output has twice the frame count/rate. Interleaved fields in
 both planes, left chroma siting per field, height divisible by four.
 --frames is the exact number to read; trailing raw frames are not consumed.
-Output: Annex B elementary stream plus <output-file>.timestamps.csv with rational
-PTS/DTS/duration and byte offsets. Existing files are never overwritten.
+Output: avformat selects the muxer from the filename; -f/--output-format overrides
+the filename with an FFmpeg muxer name (e.g. matroska, mpegts, mp4). Unknown formats
+and incompatible streams fail; no output-format whitelist. Existing files are never
+overwritten. Output requires a local single file; muxers managing their own IO
+(e.g. HLS/segment) and stdout are not supported. Raw/synthetic H.264/HEVC elementary
+output also writes a timestamps CSV.
 P1 disables frame reordering. --quality is native VT Quality, not CRF/CQP.
 SIGINT drains submitted frames and discards the incomplete output (exit 130).
 Feature probing creates a hardware-only 1920x1080 VideoToolbox session.
 Listed properties are not validated value combinations; the probe encodes no frames.
 Compressed input: avformat probes any format; hardware-only encode.
-MP4/MOV output, first audio track copied by default.
+First audio track copied by default; the selected output must accept its codec.
 --input-res selects tightly packed raw input instead of avformat.
 --avhw: avformat demuxing, require hardware decoding; any hardware decode failure is fatal.
 --avsw: use FFmpeg libavformat demuxing and libavcodec software decoding.
@@ -277,10 +273,12 @@ Default: try hardware decoding, then restart once with software decoding on a
 replayable input after a decoder failure. Non-seekable input cannot be restarted;
 select --avsw in advance when hardware decoding is unavailable. Encoder, filter,
 demux and output failures never trigger a retry.
-Video PTS, VFR and display orientation are preserved. If the final frame duration
-is absent, the preceding display interval is used with a diagnostic (single-frame
-input without duration fails). Audio timestamp rounding to the output sampling
-clock is reported and bounded to half an audio tick. GPU filters use Metal only.
+Video PTS/VFR are rescaled to the muxer time base; rounding is reported and limited
+to half an output tick, and collapsed frame intervals fail. Metadata preservation
+depends on the selected container. If the final frame duration is absent, the
+preceding display interval is used with a diagnostic (single-frame input without
+duration fails). Audio timestamp rounding to the output
+time base is reported and bounded to half an audio tick. GPU filters use Metal only.
 Crop uses even margins in stored pixels, then bilinear resize to even output size.
 Output pixel aspect ratio is preserved; explicit output size may stretch the image.
 8/10-bit and range conversion are supported; depth follows --output-depth (default 8).

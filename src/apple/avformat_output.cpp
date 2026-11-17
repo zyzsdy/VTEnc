@@ -2,6 +2,9 @@
 #include "cf_ref.hpp"
 #include "encoder_session.hpp"
 #include "bob.hpp"
+extern "C" {
+#include <libavutil/opt.h>
+}
 
 #include <algorithm>
 #include <cerrno>
@@ -52,6 +55,8 @@ struct ContainerOutput::Impl {
     std::string directory, temporary, destination;
     bool finished = false;
     bool reported_audio_rescale = false;
+    bool reported_video_rescale = false;
+    std::int64_t last_video_pts = AV_NOPTS_VALUE;
     ~Impl() {
         if (mux) {
             if (mux->pb) avio_closep(&mux->pb);
@@ -61,6 +66,20 @@ struct ContainerOutput::Impl {
             std::error_code error;
             std::filesystem::remove_all(directory, error);
         }
+    }
+    std::int64_t ticks(CMTime time, AVStream* stream, bool& reported, const char* kind) {
+        if (!CMTIME_IS_NUMERIC(time) || time.epoch || CMTIME_HAS_BEEN_ROUNDED(time)) throw std::runtime_error("Invalid mux input time");
+        const auto base = stream->time_base;
+        if (base.num <= 0 || base.den <= 0) throw std::runtime_error("Invalid muxer time base");
+        const auto result = av_rescale_q(time.value, AVRational{1, time.timescale}, base);
+        const auto rounded = media_time(result, base, "muxer timestamp");
+        if (!reported && CMTimeCompare(time, rounded) != 0) {
+            std::cerr << "vtenc: " << kind << " timestamps rescaled from 1/" << time.timescale
+                      << " to " << base.num << '/' << base.den
+                      << " (nearest output tick; muxer=" << mux->oformat->name << ")\n";
+            reported = true;
+        }
+        return result;
     }
     void check() const {
         if (finished) throw std::runtime_error("Write after container finish");
@@ -74,14 +93,25 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
     struct stat existing{};
     if (lstat(config.output.c_str(), &existing) == 0) throw std::runtime_error("Output already exists: " + config.output);
     if (errno != ENOENT) throw std::runtime_error("Inspect output: " + std::string(std::strerror(errno)));
+    // Use the real destination for guessing, not the extensionless temporary file.
+    av_check(avformat_alloc_output_context2(&s.mux, nullptr,
+        config.output_format.empty() ? nullptr : config.output_format.c_str(), config.output.c_str()),
+        "avformat_alloc_output_context2 [use -f/--output-format to specify the muxer]");
+    if (!s.mux) throw std::runtime_error("No output mux context");
+    if (s.mux->oformat->flags & AVFMT_NOFILE) {
+        throw std::runtime_error("Selected muxer manages its own files/IO; transactional single-file output is required");
+    }
     auto pattern = config.output + ".part.XXXXXX";
     if (!mkdtemp(pattern.data())) throw std::runtime_error("Create output directory: " + std::string(std::strerror(errno)));
     s.directory = std::move(pattern); s.temporary = s.directory + "/media";
-    // The output contract remains MP4/MOV; only input format selection is automatic.
-    auto extension = std::filesystem::path(config.output).extension().string();
-    for (char& c : extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    av_check(avformat_alloc_output_context2(&s.mux, nullptr, extension == ".mov" ? "mov" : "mp4", s.temporary.c_str()), "avformat_alloc_output_context2");
-    if (!s.mux) throw std::runtime_error("No output mux context");
+    av_freep(&s.mux->url);
+    s.mux->url = av_strdup(s.temporary.c_str());
+    if (!s.mux->url) throw std::bad_alloc();
+    // Configure optional muxer capabilities, without maintaining a format list.
+    const auto has_option = [&](const char* name) {
+        return s.mux->priv_data && av_opt_find(s.mux->priv_data, name, nullptr, 0, 0);
+    };
+    const bool movie_clock = has_option("movie_timescale");
     s.mux->avoid_negative_ts = AVFMT_AVOID_NEG_TS_DISABLED;
     s.video = avformat_new_stream(s.mux, nullptr);
     if (!s.video) throw std::bad_alloc();
@@ -91,7 +121,12 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
     const auto dimensions = CMVideoFormatDescriptionGetDimensions(format);
     p->codec_type = AVMEDIA_TYPE_VIDEO;
     p->codec_id = config.video.codec == Codec::h264 ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
-    p->codec_tag = config.video.codec == Codec::h264 ? MKTAG('a','v','c','1') : MKTAG('h','v','c','1');
+    // Let the muxer choose its codec tag. Prefer hvc1 only where its tag table
+    // explicitly supports it, retaining the existing MP4/QuickTime behavior.
+    if (p->codec_id == AV_CODEC_ID_HEVC && s.mux->oformat->codec_tag &&
+        av_codec_get_id(s.mux->oformat->codec_tag, MKTAG('h','v','c','1')) == AV_CODEC_ID_HEVC) {
+        p->codec_tag = MKTAG('h','v','c','1');
+    }
     p->width = dimensions.width; p->height = dimensions.height;
     p->format = config.video.bit_depth == 10 ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P;
     p->field_order = AV_FIELD_PROGRESSIVE;
@@ -138,24 +173,24 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
         s.audio->codecpar->codec_tag = 0;
         s.source_audio_base = {info.audio_timebase_num, info.audio_timescale};
         s.audio->time_base = s.source_audio_base;
-        movie_scale = std::lcm(movie_scale, static_cast<std::int64_t>(info.audio_timescale));
+        if (movie_clock) movie_scale = std::lcm(movie_scale, static_cast<std::int64_t>(info.audio_timescale));
         // The MOV muxer uses the audio sampling clock. Include it so priming,
         // track offsets and edit durations need not be rounded to milliseconds.
-        if (info.audio_parameters->sample_rate > 0) {
+        if (movie_clock && info.audio_parameters->sample_rate > 0) {
             const auto rate = info.audio_parameters->sample_rate;
             const auto factor = rate / std::gcd(movie_scale, static_cast<std::int64_t>(rate));
             if (movie_scale > std::numeric_limits<std::int32_t>::max() / factor) throw std::runtime_error("Movie timescale exceeds 32-bit range");
             movie_scale *= factor;
         }
     }
-    if (movie_scale > std::numeric_limits<std::int32_t>::max()) throw std::runtime_error("Movie timescale exceeds 32-bit range");
+    if (movie_clock && movie_scale > std::numeric_limits<std::int32_t>::max()) throw std::runtime_error("Movie timescale exceeds 32-bit range");
     av_check(avio_open(&s.mux->pb, s.temporary.c_str(), AVIO_FLAG_WRITE), "avio_open output");
     AVDictionary* options = nullptr;
-    av_dict_set_int(&options, "video_track_timescale", scale, 0);
-    av_dict_set_int(&options, "movie_timescale", movie_scale, 0);
+    if (has_option("video_track_timescale")) av_dict_set_int(&options, "video_track_timescale", scale, 0);
+    if (movie_clock) av_dict_set_int(&options, "movie_timescale", movie_scale, 0);
     const int status = avformat_write_header(s.mux, &options);
     av_dict_free(&options);
-    av_check(status, "avformat_write_header [audio must be copy-compatible; use --no-audio]");
+    av_check(status, "avformat_write_header [selected muxer must accept the video codec and copied audio; use --no-audio to omit audio]");
 }
 ContainerOutput::~ContainerOutput() = default;
 void ContainerOutput::append_video(CMSampleBufferRef sample) {
@@ -165,10 +200,16 @@ void ContainerOutput::append_video(CMSampleBufferRef sample) {
     auto packet = make_packet();
     av_check(av_new_packet(packet.get(), static_cast<int>(size)), "Allocate muxed video packet");
     check_status(CMBlockBufferCopyDataBytes(CMSampleBufferGetDataBuffer(sample), 0, size, packet->data), "Copy hardware encoded video packet");
-    packet->pts = exact_ticks(CMSampleBufferGetPresentationTimeStamp(sample), s.video->time_base);
+    const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
+    packet->pts = s.ticks(pts, s.video, s.reported_video_rescale, "video");
     const auto dts = CMSampleBufferGetDecodeTimeStamp(sample);
-    packet->dts = CMTIME_IS_VALID(dts) ? exact_ticks(dts, s.video->time_base) : packet->pts;
-    packet->duration = exact_ticks(CMSampleBufferGetDuration(sample), s.video->time_base);
+    packet->dts = CMTIME_IS_VALID(dts) ? s.ticks(dts, s.video, s.reported_video_rescale, "video") : packet->pts;
+    const auto end = CMTimeAdd(pts, CMSampleBufferGetDuration(sample));
+    packet->duration = s.ticks(end, s.video, s.reported_video_rescale, "video") - packet->pts;
+    if (packet->duration <= 0 || (s.last_video_pts != AV_NOPTS_VALUE && packet->pts <= s.last_video_pts)) {
+        throw std::runtime_error("Output time base collapses video frame intervals; choose a finer-timebase output format");
+    }
+    s.last_video_pts = packet->pts;
     packet->stream_index = s.video->index;
     if (keyframe(sample)) packet->flags |= AV_PKT_FLAG_KEY;
     av_check(av_interleaved_write_frame(s.mux, packet.get()), "av_interleaved_write_frame [hardware video]");
@@ -180,15 +221,7 @@ void ContainerOutput::append_audio(const AVPacket* source) {
     auto packet = make_packet();
     av_check(av_packet_ref(packet.get(), source), "Reference copied audio packet");
     const auto audio_ticks = [&](std::int64_t value, const char* context) {
-        const auto time = media_time(value, s.source_audio_base, context);
-        const auto ticks = av_rescale_q(value, s.source_audio_base, s.audio->time_base);
-        if (!s.reported_audio_rescale && CMTimeCompare(media_time(ticks, s.audio->time_base, context), time) != 0) {
-            std::cerr << "vtenc: audio timestamps rescaled from " << s.source_audio_base.num << '/' << s.source_audio_base.den
-                      << " to " << s.audio->time_base.num << '/' << s.audio->time_base.den
-                      << " (nearest output audio tick; MP4/MOV sampling clock)\n";
-            s.reported_audio_rescale = true;
-        }
-        return ticks;
+        return s.ticks(media_time(value, s.source_audio_base, context), s.audio, s.reported_audio_rescale, "audio");
     };
     packet->pts = audio_ticks(source->pts, "audio PTS");
     packet->dts = source->dts == AV_NOPTS_VALUE ? packet->pts : audio_ticks(source->dts, "audio DTS");

@@ -14,8 +14,8 @@
 - Objective-C++ / ARC 的 Metal 设备查询。
 - 合成测试帧 / 原始 NV12、P010 输入，H.264 High 8-bit、HEVC Main 8-bit / Main10 硬件编码。
 - 平均码率目标或原生 Quality、GOP 上限、整数有理数帧率；Annex B 输出及逐帧时间戳 CSV。
-- 压缩输入统一交给 `libavformat` 自动探测，不设格式或扩展名白名单；支持实测 MKV、TS、WebM、MP4/MOV 等，探测失败直接报错。原生 VideoToolbox 硬解或 `libavcodec` 软解，原生硬编，avformat 封装 MP4/MOV，默认复制第一条音轨。
-- 文件转码保留源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换；支持 `hev1` 描述适配。
+- 压缩输入统一交给 `libavformat` 自动探测，不设格式或扩展名白名单；支持实测 MKV、TS、WebM、MP4/MOV 等，探测失败直接报错。原生 VideoToolbox 硬解或 `libavcodec` 软解，原生硬编，avformat 根据输出文件名选择封装器，或由 `-f` / `--output-format` 显式指定；默认复制第一条音轨。
+- 文件转码将源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换传入封装器，精度与元数据保存取决于目标格式；支持 `hev1` 描述适配。
 - Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709 YCbCr 矩阵转换。
 - Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010、硬解或软解的文件输入。两个原始交错样片在本机无法硬解，可用软解接入 Metal Bob。
 - 有界回调和重排队列、背压和排空；SIGINT 取消、失败清理、输出防覆盖。
@@ -93,17 +93,17 @@ python3 tests/encode_hardware.py --vtenc build/dev/vtenc
 
 输入尺寸和帧数必须显式提供。`-i` 只接受普通原始文件：8-bit 是紧密排列的 NV12（Y 后接交错 UV），10-bit 是小端 P010（每个 16-bit 字的高 10 位有效，低 6 位为零）；文件中没有行填充。`--output-depth` 同时决定原始输入格式，不做位深转换。只读 `--frames` 指定的帧数，尾部数据不消费，输入不足则报错。合成输入为移动灰阶渐变。
 
-本阶段限定逐行、video range、BT.709 SDR；调用方负责提供符合约定的原始数据。10-bit 不等于 HDR；本阶段不读取或转换输入色彩元数据。帧率是整数或整数分数，PTS 从 0 开始，以 `帧号 × fps_den / fps_num` 构造，不做浮点累积。默认禁用帧重排，未实现 B 帧、VFR、滤镜、音频或容器封装。
+本阶段限定逐行、video range、BT.709 SDR；调用方负责提供符合约定的原始数据。10-bit 不等于 HDR；本阶段不读取或转换输入色彩元数据。帧率是整数或整数分数，PTS 从 0 开始，以 `帧号 × fps_den / fps_num` 构造，不做浮点累积。默认禁用帧重排；原始帧输入使用固定帧率，不携带音频，可输出裸码流或 avformat 容器。
 
 默认平均码率目标为 5000 kbit/s。`--bitrate` 绑定 `AverageBitRate`，是软目标，不保证输出大小；`--quality` 绑定原生 `Quality`，不等价于 CRF/CQP，两者不能同时指定。`--gop-len` 是最大关键帧间隔，编码器可以提前插入关键帧。所有属性设置检查 OSStatus，不支持就失败，不做软件回退。
 
-输出为 Annex B 裸码流，不因文件扩展名变成 MP4/MOV。同步帧前写入 SPS/PPS（HEVC 还包括 VPS），将长度前缀 NAL 转为起始码。裸码流不携带容器级 PTS/DTS，播放器或 FFprobe 猜测的帧率可能不正确；封装时需指定本次输入帧率。`<输出路径>.timestamps.csv` 保存编码回调原始整数 PTS/DTS/duration、同步帧标记及该帧的字节范围；VideoToolbox 未指定的 DTS 保持为空，范围包括该帧前的参数集。
+输出格式由文件名或 `-f` / `--output-format` 决定，例如 `.mkv`、`.ts`、`.mp4`，与压缩输入转码使用相同的封装器选择规则。选择与编码器匹配的 H.264 / HEVC 裸码流时，保留 Annex B 和时间戳 CSV 输出：同步帧前写入 SPS/PPS（HEVC 还包括 VPS），将长度前缀 NAL 转为起始码。裸码流不携带容器级 PTS/DTS，播放器或 FFprobe 猜测的帧率可能不正确；封装时需指定本次输入帧率。`<输出路径>.timestamps.csv` 保存编码回调原始整数 PTS/DTS/duration、同步帧标记及该帧的字节范围；VideoToolbox 未指定的 DTS 保持为空，范围包括该帧前的参数集。
 
 同目录临时文件在全部排空、帧数与时间戳校验、硬件后端复核后发布；已有输出或时间戳文件均不覆盖。每批最多 8 帧，回调只保留样本或记录错误，调度线程负责码流写出。SIGINT 停止新提交、排空已提交帧、删除临时输出并返回 130。运行错误返回 1 并清理临时输出；进程被强制杀死或系统崩溃时可能残留 `.part.*` 文件。两个文件分别原子发布，不承诺跨文件的崩溃事务。
 
 2026-11-16 在 Apple M6 / macOS 27.2.1 上完成三种格式的真实硬编及独立码流验证，覆盖合成输入、非对齐宽度原始输入、尾批排空及异常路径。详见 [P1 验证记录](docs/P1验证.md)。该结果不代表其他硬件、旧 macOS、任意分辨率或 HDR 已验证。
 
-## 压缩输入转码（MP4/MOV 输出）
+## 压缩输入转码与输出格式
 
 ```bash
 # H.264 输出，默认复制第一条音轨（也可以显式写 --audio-copy）
@@ -125,7 +125,26 @@ ctest --preset dev -R '^vtenc.timeline$'
 python3 tests/transcode_hardware.py --vtenc build/dev/vtenc
 ```
 
-不提供 `--input-res` 的文件输入全部走 avformat：不检查支持格式列表，也不依赖扩展名。MKV、TS、WebM、未知扩展名、无扩展名或错误扩展名均直接尝试解封装；失败保留 FFmpeg 的操作名、错误文本和错误码。输出仍为 `.mp4` / `.mov`。文件模式读取源尺寸和时间轴，拒绝 `--fps`、`--frames`。`--input-res` 明确选择 P1 紧密排列原始帧模式，此时还需 `--frames`，且不能指定 `--avhw` / `--avsw`。
+不提供 `--input-res` 的文件输入全部走 avformat：不检查支持格式列表，也不依赖扩展名。MKV、TS、WebM、未知扩展名、无扩展名或错误扩展名均直接尝试解封装；失败保留 FFmpeg 的操作名、错误文本和错误码。输出不限制扩展名或格式列表：省略 `-f` 时由 avformat 根据输出文件名选择封装器；指定 `-f FORMAT` 或 `--output-format FORMAT` 时优先使用该 FFmpeg 封装器名称。无法推断格式、未知封装器或不兼容的流直接报错，不触发软解回退。文件模式读取源尺寸和时间轴，拒绝 `--fps`、`--frames`。`--input-res` 明确选择 P1 紧密排列原始帧模式，此时还需 `--frames`，且不能指定 `--avhw` / `--avsw`。
+
+输出示例（编码器始终为 VideoToolbox 硬件编码器）：
+
+```bash
+./build/dev/vtenc --avhw -i input.mkv -o build/output.ts
+./build/dev/vtenc --avsw -i input.ts -o build/output.mkv
+./build/dev/vtenc -i input.anything -o build/output.data -f matroska
+./build/dev/vtenc -i input.mkv -o build/extensionless --output-format mpegts
+# 裸视频封装器不接受音轨，需要明确省略音频
+./build/dev/vtenc -i input.mkv -o build/output.h264 --no-audio
+```
+
+`-f` 与 `--output-format` 是同一选项，重复指定报错。格式名称由链接的 FFmpeg 提供，不在 CLI 中维护名单，也不会改变 `--codec` 的选择。输出保持本地单文件事务：完成后原子发布，不覆盖已有文件，失败或取消清理临时文件；不支持 stdout，也不支持自行管理 IO / 多文件的封装器（如 HLS、segment）。
+
+显式运行输出封装回归（不注册为默认 CTest）：
+
+```bash
+python3 tests/output_formats_hardware.py --vtenc build/dev/vtenc
+```
 
 压缩输入 `-i -` 交给 avformat 读取标准输入。不可 seek 的管道 / 实时输入无法从头重试：默认模式若硬解失败，会明确报错并提示预先选择 `--avsw`，不会从已消耗数据的中间位置伪造一次成功重试。
 
@@ -158,11 +177,11 @@ python3 tests/avformat_hardware.py --vtenc build/dev/vtenc
 
 FFmpeg 来自外部安装，本仓库没有复制其上游实现。FFmpeg 的基础许可证为 LGPL 2.1-or-later，启用 GPL/version3 等配置会改变该构建的许可证；本机 Homebrew 库启用了 GPL 与 version3。分发时须按实际链接库的许可证提供对应源码、配置及声明，不能将任意 Homebrew 构建视为 LGPL-only。见 [FFmpeg 许可证说明](https://ffmpeg.org/legal.html)。VTEnc 不调用 FFmpeg 的视频编码 API。
 
-音频通过 avformat 读取并复制到 MP4/MOV，不进行音频重编码；必要时由封装器执行 AAC ADTS → AudioSpecificConfig 位流适配。默认复制第一条音轨，`--no-audio` 禁用。与目标容器不兼容的音频直接报错并提示 `--no-audio`。AVPacket 的 priming / trim 边信息随包保留，音视频共用输入时间原点，不分别归零。
+音频通过 avformat 读取并复制到所选输出容器，不进行音频重编码；必要时由封装器执行 AAC ADTS → AudioSpecificConfig 位流适配。默认复制第一条音轨，`--no-audio` 禁用。与目标容器不兼容的音频直接报错并提示 `--no-audio`。AVPacket 的 priming / trim 边信息随包传入封装器，能否写入取决于目标格式（例如 TS 不保存 AAC priming / trim）；不同容器的音频首尾解码采样数可能不同。音视频共用输入时间原点，不分别归零。
 
-视频 PTS 使用整数有理数精确传递，相邻 PTS 决定显示时长。TS 等容器可能没有末帧 duration：此时明确打印诊断并沿用前一个显示间隔；只有一帧且无 duration 时仍报错。音频的输入时钟（例如 MKV 的 1/1000 或 TS 的 1/90000）未必能精确映射到 MP4/MOV 的音频采样时钟；采用整数有理数就近舍入，误差不超过半个输出音频刻度，并首次打印换算诊断。可精确表示时不舍入。源音频 PTS 不递增、损坏包、流参数变化或目标封装失败均直接退出。
+视频 PTS 使用整数有理数传递，相邻 PTS 决定显示时长。TS 等容器可能没有末帧 duration：此时明确打印诊断并沿用前一个显示间隔；只有一帧且无 duration 时仍报错。音视频的输入时钟未必能精确映射到封装器选定的输出时钟（例如 MKV 常用 1/1000，TS 使用 1/90000）；写入时采用整数有理数就近舍入，误差不超过半个输出刻度，并首次打印换算诊断。可精确表示时不舍入；输出时钟若把不同视频帧的 PTS 或有效时长压成同一刻度，直接报错。封装器最终可保存的时长、旋转与边信息取决于格式；裸码流没有容器级时间戳。源音频 PTS 不递增、损坏包、流参数变化或目标封装失败均直接退出。
 
-当前限定一个 SDR 视频轨；交错输入必须显式启用 Bob。支持位深、尺寸和基础色彩转换；不支持 HDR / Dolby Vision、音频转码、多音轨选择、字幕、章节与附件。显示旋转保留容器变换；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
+当前限定一个 SDR 视频轨；交错输入必须显式启用 Bob。支持位深、尺寸和基础色彩转换；不支持 HDR / Dolby Vision、音频转码、多音轨选择、字幕、章节与附件。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
 
 取消或运行错误不发布成品，临时目录自动清理；成功写完 trailer、检查写入错误并关闭文件后，以不覆盖既有文件的方式发布。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
 
