@@ -11,6 +11,7 @@ namespace vtenc {
 
 enum class Command { help, version, check_device, check_features, encode, transcode };
 enum class Codec { h264, hevc };
+enum class DecodeMode { automatic, hardware, software };
 
 struct ProbeConfig {
     Codec codec = Codec::h264;
@@ -40,6 +41,7 @@ struct FilterConfig {
 
 struct EncodeConfig {
     ProbeConfig video;
+    DecodeMode decode = DecodeMode::automatic;
     FilterConfig filter;
     std::string input; // Empty means synthetic input; otherwise tightly packed NV12/P010 LE.
     std::string output;

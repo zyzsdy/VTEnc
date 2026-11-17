@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Explicit Bob validation. Original compressed decode failures are reported as blocked.
-Offline FFmpeg decode is test-fixture preparation, never a VTEnc software fallback.
+This suite explicitly selects --avhw for compressed input; raw fixtures are prepared offline.
 """
 import argparse
 import csv
@@ -105,7 +105,7 @@ def main():
     for name in ["interlaced_tff_h264", "telecine_32_tff_h264"]:
         source = args.samples / "deinterlace" / (name + ".mp4")
         native = directory / (name + "-native.mp4")
-        result = subprocess.run([str(binary), "-i", str(source), "-o", str(native), "--deinterlace", "bob", "--field-order", "tff", "--no-audio"],
+        result = subprocess.run([str(binary), "--avhw", "-i", str(source), "-o", str(native), "--deinterlace", "bob", "--field-order", "tff", "--no-audio"],
                                 capture_output=True, text=True, timeout=120)
         if result.returncode:
             require(result.returncode == 1 and "VTDecompressionSessionCreate [hardware required; Bob source; no software fallback]" in result.stderr
@@ -175,7 +175,7 @@ def main():
     require(packets(probe(carrier), "audio")[0] is not None, "Derived woven carrier lost AAC")
     for name, source, count, size in [("woven-carrier-audio", carrier, 360, (360, 240)), ("forced-vfr-audio", vfr, 440, (320, 180))]:
         output = directory / (name + ".mov")
-        result = run([binary, "-i", source, "-o", output, "--deinterlace", "bob", "--field-order", "tff",
+        result = run([binary, "--avhw", "-i", source, "-o", output, "--deinterlace", "bob", "--field-order", "tff",
                       "--crop", "8,4,8,4", "--output-res", f"{size[0]}x{size[1]}", "--codec", "hevc", "--output-depth", 10])
         require("Hardware decoder verified: yes" in result.stdout and f"Metal GPU frames completed: {count}" in result.stdout, "Hardware Bob pipeline not confirmed")
         record = verify(source, output, "hevc", 10, True, size, bob=True)
@@ -210,7 +210,7 @@ def main():
     report = {"system": platform.platform(), "metal_device": run([binary, "--check-device"]).stdout.strip(),
               "gpu_checks": pixel_checks, "original_compressed_inputs": originals, "validated_cases": records,
               "errors": ["missing field order", "misaligned crop", "SIGINT and cleanup"],
-              "limitations": ["Offline software decoding is fixture preparation only; no runtime fallback",
+              "limitations": ["This suite selects --avhw; automatic/software decoding is covered separately",
                               "Hard telecine repeated fields retained; no IVTC or cadence recovery"]}
     path = directory / "verification.json"
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")

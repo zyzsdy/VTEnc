@@ -69,7 +69,9 @@ int main(int argc, char* argv[]) {
                       << " bytes (" << vtenc::codec_name(options.encode.video.codec) << ' '
                       << options.encode.video.bit_depth << "-bit)\nOutput: " << options.encode.output << '\n';
             if (transcode) {
-                std::cout << "Hardware decoder verified: yes\nAudio samples copied (first track): " << result.audio_samples << '\n';
+                std::cout << (result.decoder == vtenc::DecodeMode::hardware
+                    ? "Hardware decoder verified: yes\n" : "Software decoder: FFmpeg libavcodec (libavformat demux)\n")
+                    << "Audio samples copied (first track): " << result.audio_samples << '\n';
             } else std::cout << "Timestamps: " << options.encode.output << ".timestamps.csv\n";
             std::cout << "Metal GPU frames completed: " << result.gpu_frames << '\n';
             break;

@@ -59,6 +59,11 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             encode_options = true;
             continue;
         }
+        if (arg == "--avhw" || arg == "--avsw") {
+            result.encode.decode = arg == "--avhw" ? DecodeMode::hardware : DecodeMode::software;
+            encode_options = true;
+            continue;
+        }
         if (arg == "--audio-copy" || arg == "--no-audio") {
             result.encode.copy_audio = arg == "--audio-copy";
             encode_options = true;
@@ -163,6 +168,9 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             result.encode.quality = quality;
         }
     }
+    if (seen.contains("--avhw") && seen.contains("--avsw")) {
+        throw std::invalid_argument("--avhw and --avsw are mutually exclusive");
+    }
     if (seen.contains("--field-order") && !result.encode.filter.bob) {
         throw std::invalid_argument("--field-order requires --deinterlace bob");
     }
@@ -194,6 +202,9 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
                 throw std::invalid_argument("--audio-copy and --no-audio are mutually exclusive");
             }
         } else {
+            if (seen.contains("--avhw") || seen.contains("--avsw")) {
+                throw std::invalid_argument("--avhw and --avsw require MP4/MOV compressed input");
+            }
             if (result.encode.filter.requested) throw std::invalid_argument("GPU filters require MP4/MOV input");
             if (!seen.contains("--input-res")) throw std::invalid_argument("Encoding requires --input-res WIDTHxHEIGHT");
             if (result.encode.filter.bob) {
@@ -232,6 +243,7 @@ Usage:
   vtenc --check-device
   vtenc --check-features [--codec h264|hevc] [--output-depth 8|10]
   vtenc -i input.mp4|input.mov -o output.mp4|output.mov
+        [--avhw | --avsw]
         [--codec h264|hevc] [--output-depth 8|10] [--audio-copy | --no-audio]
         [--crop LEFT,TOP,RIGHT,BOTTOM] [--output-res WIDTHxHEIGHT]
         [--output-range limited|full] [--output-matrix bt601|bt709]
@@ -255,7 +267,11 @@ P1 disables frame reordering. --quality is native VT Quality, not CRF/CQP.
 SIGINT drains submitted frames and discards the incomplete output (exit 130).
 Feature probing creates a hardware-only 1920x1080 VideoToolbox session.
 Listed properties are not validated value combinations; the probe encodes no frames.
-MP4/MOV: hardware-only decode and encode, first audio track copied by default.
+MP4/MOV: hardware-only encode, first audio track copied by default.
+--avhw: require hardware decoding; any hardware decode failure is fatal.
+--avsw: use FFmpeg libavformat demuxing and libavcodec software decoding.
+Default: try hardware decoding, then restart once with software decoding on a
+decoder failure. Encoder, filter and output failures never trigger a retry.
 PTS, VFR and display orientation are preserved. GPU filters use Metal only.
 Crop uses even margins in stored pixels, then bilinear resize to even output size.
 Output pixel aspect ratio is preserved; explicit output size may stretch the image.
@@ -266,8 +282,8 @@ No gamut/transfer conversion, tone mapping, dithering or antialiasing downscale.
 SDR only; interlaced input requires explicit --deinterlace bob (Metal, two outputs
 per input). Auto field order requires unambiguous metadata; tff/bff overrides it.
 Bob requires height and vertical crop margins divisible by four, keeps telecine
-repeated fields, and is not inverse telecine. Hardware decode remains mandatory
-for MP4/MOV; unsupported interlaced codecs fail, with no software fallback.
+repeated fields, and is not inverse telecine. Software decoding accepts 8/10-bit
+4:2:0 video; other decoded pixel layouts are rejected.
 HDR and Dolby Vision are rejected.
 Exit codes: 0 success, 1 runtime/hardware failure, 2 invalid arguments, 130 cancelled.
 )";

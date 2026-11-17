@@ -4,10 +4,13 @@
 #include "source_format.hpp"
 #include "gpu_filter.hpp"
 #include "bob.hpp"
+#include "decoded_frames.hpp"
+#include "decode_policy.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -32,9 +35,6 @@ bool sample_flag(CMSampleBufferRef sample, CFStringRef key) {
 void validate_source(CMFormatDescriptionRef format, bool bob) {
     const auto codec = CMFormatDescriptionGetMediaSubType(format);
     if (codec == 0x64766831U || codec == 0x64766865U) throw std::runtime_error("Dolby Vision input is not supported by the P2 SDR pipeline");
-    if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != 0x68657631U && codec != kCMVideoCodecType_AV1) {
-        throw std::runtime_error("P2 accepts H.264, HEVC or AV1 video when a hardware decoder is available");
-    }
     const auto fields = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FieldCount);
     if (fields) {
         int count = 0;
@@ -59,16 +59,15 @@ void validate_source(CMFormatDescriptionRef format, bool bob) {
     }
 }
 
-struct Frame {
-    CFRef<CVPixelBufferRef> pixel;
-    CMTime pts;
-    CMTime duration;
-};
+using Frame = DecodedFrame;
 
 class HardwareDecoder {
 public:
-    HardwareDecoder(CMFormatDescriptionRef format, bool bob) : format_(hardware_decode_format(format)) {
-        validate_source(format, bob);
+    HardwareDecoder(CMFormatDescriptionRef format, bool bob) try : format_(hardware_decode_format(format)) {
+        const auto codec = CMFormatDescriptionGetMediaSubType(format);
+        if (codec != kCMVideoCodecType_H264 && codec != kCMVideoCodecType_HEVC && codec != 0x68657631U && codec != kCMVideoCodecType_AV1) {
+            throw std::runtime_error("Native hardware decoder supports H.264, HEVC and AV1 only");
+        }
         const void* keys[] = {kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder};
         const void* values[] = {kCFBooleanTrue};
         CFRef specification(CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1,
@@ -103,10 +102,11 @@ public:
         }
         catch (...) { VTDecompressionSessionInvalidate(session_); CFRelease(session_); session_ = nullptr; throw; }
     }
+    catch (const std::runtime_error& error) { throw HardwareDecodeError(error.what()); }
     ~HardwareDecoder() {
         if (session_) { VTDecompressionSessionInvalidate(session_); CFRelease(session_); }
     }
-    std::optional<Frame> decode(CMSampleBufferRef sample) {
+    std::optional<Frame> decode(CMSampleBufferRef sample) try {
         frame_.reset();
         error_ = nullptr;
         called_ = false;
@@ -138,11 +138,12 @@ public:
         }
         return std::move(frame_);
     }
-    void finish() {
+    catch (const std::runtime_error& error) { throw HardwareDecodeError(error.what()); }
+    void finish() try {
         check_status(VTDecompressionSessionWaitForAsynchronousFrames(session_), "VTDecompressionSessionWaitForAsynchronousFrames");
         if (error_) std::rethrow_exception(error_);
         verify();
-    }
+    } catch (const std::runtime_error& error) { throw HardwareDecodeError(error.what()); }
 private:
     void verify() {
         CFTypeRef raw = nullptr;
@@ -173,11 +174,11 @@ private:
     bool suppressed_ = false;
 };
 
-class DisplayFrames {
+class DisplayFrames final : public DecodedFrames {
 public:
     DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled, bool bob)
         : input_(input), cancelled_(cancelled), decoder_(input.info().video_format, bob) {}
-    std::unique_ptr<Frame> next() {
+    std::unique_ptr<Frame> next() override {
         while (!cancelled_) {
             if (!frames_.empty() && (eof_ || (CMTIME_IS_NUMERIC(watermark_) && CMTimeCompare(frames_.front()->pts, watermark_) <= 0))) {
                 auto frame = std::move(frames_.front());
@@ -229,8 +230,11 @@ private:
 class EncodedVideo {
 public:
     EncodedVideo(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
-        : input_(input), config_(std::move(config)), frames_(input, cancelled, config_.filter.bob), cancelled_(cancelled) {
-        current_ = frames_.next();
+        : input_(input), config_(std::move(config)), cancelled_(cancelled) {
+        validate_source(input.info().video_format, config_.filter.bob);
+        if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input.info(), cancelled);
+        else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob);
+        current_ = frames_->next();
         if (!current_) {
             if (!cancelled_) throw std::runtime_error("Input contains no displayable video frames");
             return;
@@ -239,7 +243,7 @@ public:
         const auto dimensions = CMVideoFormatDescriptionGetDimensions(input_.info().video_format);
         config_.video.width = dimensions.width;
         config_.video.height = dimensions.height;
-        std::optional<CFRef<CMVideoFormatDescriptionRef>> filtered_format;
+        std::optional<CFRef<CMVideoFormatDescriptionRef>> encoder_input_format;
         if (needs_gpu_filter(config_, pixel)) {
             filter_ = std::make_unique<GpuFilter>(make_filter_plan(config_, input_.info().video_format, pixel));
             if (config_.filter.bob) first_field_ = bob_first_field(config_.filter.field_order, input_.info().video_format, pixel);
@@ -247,12 +251,14 @@ public:
             pixel = filtered_->get();
             config_.video.width = static_cast<int>(CVPixelBufferGetWidth(pixel));
             config_.video.height = static_cast<int>(CVPixelBufferGetHeight(pixel));
+        }
+        if (filter_ || config_.decode == DecodeMode::software) {
             CMVideoFormatDescriptionRef raw = nullptr;
-            check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixel, &raw), "Describe filtered frame");
-            filtered_format.emplace(raw);
+            check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixel, &raw), "Describe encoder input frame");
+            encoder_input_format.emplace(raw);
         }
         create_hardware_session(session_, config_.video, &receive, this, CVPixelBufferGetPixelFormatType(pixel));
-        configure_hardware_encoder(session_.value, config_, filtered_format ? filtered_format->get() : input_.info().video_format);
+        configure_hardware_encoder(session_.value, config_, encoder_input_format ? encoder_input_format->get() : input_.info().video_format);
         check_status(VTCompressionSessionPrepareToEncodeFrames(session_.value), "Prepare container video encoder");
         verify_hardware(session_.value);
     }
@@ -263,7 +269,7 @@ public:
     CMSampleBufferRef next() {
         if (!current_ || cancelled_) return nullptr;
         if (field_index_ == 0) {
-            following_ = frames_.next();
+            following_ = frames_->next();
             if (cancelled_) return nullptr;
             frame_duration_ = following_ ? CMTimeSubtract(following_->pts, current_->pts) : current_->duration;
             require_time(frame_duration_, "video frame duration");
@@ -348,7 +354,7 @@ private:
     std::int64_t gpu_frames_ = 0;
     ContainerInput& input_;
     EncodeConfig config_;
-    DisplayFrames frames_;
+    std::unique_ptr<DecodedFrames> frames_;
     const volatile std::sig_atomic_t& cancelled_;
     std::unique_ptr<Frame> current_;
     std::unique_ptr<Frame> following_;
@@ -395,7 +401,8 @@ void validate_video_edit(CMTimeMapping mapping, CMTime first_pts, CMTime last_pt
     // PTS. Preserve that whole final frame, but reject material trailing trims.
 }
 
-EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled) try {
+static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled) {
+    if (cancelled) throw MediaCancelled{};
     ContainerInput input(config, cancelled);
     EncodedVideo encoder(input, config, cancelled);
     Sample video;
@@ -450,7 +457,19 @@ EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_
     if (!video_ended) output.end_video();
     if (!audio_ended) output.end_audio();
     const auto bytes = output.finish(cancelled);
-    return {video_count, bytes, bytes == 0, audio_count, encoder.gpu_frames()};
+    return {video_count, bytes, bytes == 0, audio_count, encoder.gpu_frames(), config.decode};
+}
+
+EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled) try {
+    return with_decode_policy(config.decode, [&](DecodeMode mode) {
+        auto attempt = config;
+        attempt.decode = mode;
+        return transcode_attempt(attempt, cancelled);
+    }, [&](const HardwareDecodeError& error) {
+        if (cancelled) throw MediaCancelled{};
+        std::cerr << "vtenc: hardware decode failed: " << error.what()
+                  << "\nvtenc: restarting from the beginning with software decoding (one retry)\n";
+    });
 } catch (const MediaCancelled&) {
     return {0, 0, true};
 }

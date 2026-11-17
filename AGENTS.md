@@ -7,7 +7,7 @@
 - 目标为 macOS ARM64 / Apple Silicon M 系列，功能范围以截至 M6 的硬件能力为上限，以实际系统和会话探测为准，不根据芯片名称猜测能力。
 - 使用 C++20。CLI、参数验证、调度、时间轴以及 VideoToolbox / CoreMedia / CoreVideo 的 C API 使用 `.cpp`。
 - 仅在调用 Objective-C API（如 Metal、AVFoundation）时使用 `.mm`，开启 ARC；公开头文件保持 C++ 接口，不暴露 Objective-C 对象。
-- 原生调用 VideoToolbox，强制硬件编解码并检查实际使用的后端。不得引入软件视频编码器或静默回退；硬件不支持的功能不开发。
+- 原生调用 VideoToolbox，编码端强制硬件编码并检查实际使用的后端，不得引入软件视频编码器。解码支持 `--avhw` 强制硬解、`--avsw` 使用 FFmpeg 底层库解封装和软解；默认先硬解，硬解失败时输出诊断并从头软解重试一次。不得静默回退，编码、滤镜与输出错误不触发软解重试。
 - 借鉴 NVEncC 的模块划分和 CLI 习惯，不机械映射 NVIDIA 专有参数。引入上游代码前核查许可证并保留声明。
 - CoreFoundation 对象采用 RAII；异步回调不得让 C++ 异常跨越 C ABI，错误必须传回调度线程。时间戳使用整数有理数。
 

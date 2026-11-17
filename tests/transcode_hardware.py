@@ -123,7 +123,7 @@ def main():
                                ("av1_8bit", "hevc", 8), ("av1_10bit", "hevc", 10)]:
         source = args.samples / "decode" / f"{name}.mp4"
         output = directory / f"{name}.mp4"
-        result = run([binary, "-i", source, "-o", output, "--codec", codec, "--output-depth", depth, "--no-audio"])
+        result = run([binary, "--avhw", "-i", source, "-o", output, "--codec", codec, "--output-depth", depth, "--no-audio"])
         require("Hardware verified: yes" in result.stdout and "Hardware decoder verified: yes" in result.stdout, "No hardware confirmation")
         records.append(verify(source, output, codec, depth, False))
         print(f"PASS {name}: {records[-1]['frames']} frames, exact PTS, hardware decode/encode", flush=True)
@@ -131,7 +131,7 @@ def main():
     vfr = args.samples / "timing/vfr_h264_aac.mp4"
     for extension in ["mp4", "mov"]:
         output = directory / f"vfr-copy.{extension}"
-        run([binary, "-i", vfr, "-o", output, "--codec", "hevc", "--audio-copy"])
+        run([binary, "--avhw", "-i", vfr, "-o", output, "--codec", "hevc", "--audio-copy"])
         records.append(verify(vfr, output, "hevc", 8, True))
         require(records[-1]["frames"] == 220 and records[-1]["first_video_pts"] == "1/5", "VFR known timeline changed")
         print(f"PASS VFR -> {extension}: 220 video frames, AAC packets/PTS/PCM unchanged", flush=True)
@@ -141,7 +141,7 @@ def main():
     run(["ffmpeg", "-nostdin", "-v", "error", "-i", vfr, "-map", "0", "-c", "copy",
          "-metadata:s:v:0", "rotate=90", mov_input])
     mov_output = directory / "rotated-output.mp4"
-    run([binary, "-i", mov_input, "-o", mov_output])
+    run([binary, "--avhw", "-i", mov_input, "-o", mov_output])
     records.append(verify(mov_input, mov_output, "h264", 8, True))
     print("PASS MOV input, display transform and audio copy", flush=True)
 
@@ -149,32 +149,32 @@ def main():
     for category in ["hdr", "deinterlace"]:
         for source in sorted((args.samples / category).glob("*.mp4")):
             output = directory / ("reject-" + source.name)
-            result = run([binary, "-i", source, "-o", output, "--codec", "hevc", "--output-depth", 10], expected=1)
+            result = run([binary, "--avhw", "-i", source, "-o", output, "--codec", "hevc", "--output-depth", 10], expected=1)
             require(any(word in result.stderr for word in ["HDR", "Dolby Vision", "Interlaced"]), result.stderr)
             require(not output.exists(), "Published unsupported input")
             rejected.append({"source": str(source), "diagnostic": result.stderr.strip()})
     malformed_audio = directory / "bad-audio.mp4"
-    result = run([binary, "-i", args.samples / "decode/h264_8bit.mp4", "-o", malformed_audio], expected=1)
+    result = run([binary, "--avhw", "-i", args.samples / "decode/h264_8bit.mp4", "-o", malformed_audio], expected=1)
     require("duplicate source timestamps" in result.stderr, result.stderr)
     require(not malformed_audio.exists(), "Published malformed audio timeline")
     rejected.append({"source": "decode/h264_8bit.mp4 (audio enabled)", "diagnostic": result.stderr.strip()})
 
     existing = directory / "existing.mp4"
     existing.write_bytes(b"keep")
-    run([binary, "-i", vfr, "-o", existing], expected=1)
+    run([binary, "--avhw", "-i", vfr, "-o", existing], expected=1)
     require(existing.read_bytes() == b"keep", "Overwrote existing file")
     truncated = directory / "truncated.mp4"
     truncated.write_bytes(vfr.read_bytes()[:64])
     missing_output = directory / "invalid-output.mp4"
-    run([binary, "-i", truncated, "-o", missing_output], expected=1)
+    run([binary, "--avhw", "-i", truncated, "-o", missing_output], expected=1)
     require(not missing_output.exists(), "Published malformed container")
     depth_output = directory / "depth.mp4"
-    converted = run([binary, "-i", args.samples / "decode/hevc_10bit.mp4", "-o", depth_output, "--no-audio"])
+    converted = run([binary, "--avhw", "-i", args.samples / "decode/hevc_10bit.mp4", "-o", depth_output, "--no-audio"])
     require("Metal GPU frames completed: 82" in converted.stdout, "Depth conversion bypassed Metal")
     records.append(verify(args.samples / "decode/hevc_10bit.mp4", depth_output, "h264", 8, False))
 
     cancelled = directory / "cancelled.mp4"
-    process = subprocess.Popen([str(binary), "-i", str(vfr), "-o", str(cancelled)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen([str(binary), "--avhw", "-i", str(vfr), "-o", str(cancelled)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         deadline = time.monotonic() + 20
         while not list(directory.glob("cancelled.mp4.part.*")):
@@ -193,7 +193,7 @@ def main():
         signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
         resource.setrlimit(resource.RLIMIT_FSIZE, (4096, 4096))
     failed_output = directory / "write-failure.mov"
-    result = subprocess.run([str(binary), "-i", str(vfr), "-o", str(failed_output)],
+    result = subprocess.run([str(binary), "--avhw", "-i", str(vfr), "-o", str(failed_output)],
         preexec_fn=limit_file_size, capture_output=True, text=True, timeout=40)
     require(result.returncode == 1 and "AVAssetWriter" in result.stderr, f"Write failure not reported: {result.stderr}")
     require(not failed_output.exists(), "Published failed output")

@@ -11,7 +11,7 @@ endfunction()
 
 check_cli(0 "Usage:" "^$")
 check_cli(0 "VTEnc [0-9]+\\.[0-9]+\\.[0-9]+" "^$" --version)
-check_cli(0 "MP4/MOV: hardware-only decode and encode" "^$" --help)
+check_cli(0 "MP4/MOV: hardware-only encode" "^$" --help)
 check_cli(2 "^$" "Unknown argument" --bogus)
 check_cli(2 "^$" "Missing value" --check-features --codec)
 check_cli(2 "^$" "Supported codecs" --check-features --codec av1)
@@ -86,3 +86,14 @@ check_cli(2 "^$" "Duplicate option" ${file_job} --deinterlace bob --deinterlace 
 
 check_cli(2 "^$" "exceeds 32-bit range" -i raw.nv12 -o out.h264 --input-res 720x480 --frames 2147483647 --deinterlace bob --field-order tff)
 check_cli(2 "^$" "exceeds 32-bit range" -i raw.nv12 -o out.h264 --input-res 720x480 --frames 1 --fps 2147483647 --deinterlace bob --field-order tff)
+
+# Decode mode selection is explicit, exclusive and compressed-input only.
+check_cli(0 "--avhw: require hardware decoding" "^$" --help)
+check_cli(0 "--avsw: use FFmpeg" "^$" --help)
+check_cli(2 "^$" "mutually exclusive" ${file_job} --avhw --avsw)
+check_cli(2 "^$" "mutually exclusive" ${file_job} --avsw --avhw)
+check_cli(2 "^$" "Duplicate option" ${file_job} --avsw --avsw)
+check_cli(2 "^$" "Duplicate option" ${file_job} --avhw --avhw)
+check_cli(2 "^$" "require MP4/MOV compressed input" ${job} --avsw)
+check_cli(2 "^$" "require MP4/MOV compressed input" -i raw.nv12 -o out.h264 --input-res 320x180 --frames 1 --avhw)
+check_cli(2 "^$" "cannot be combined" --check-features --avsw)

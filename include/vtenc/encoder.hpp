@@ -13,6 +13,7 @@ struct EncodeResult {
     bool cancelled;
     std::int64_t audio_samples = 0;
     std::int64_t gpu_frames = 0;
+    DecodeMode decoder = DecodeMode::hardware;
 };
 
 // Hardware only. Publishes Annex B and <output>.timestamps.csv on success.

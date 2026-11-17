@@ -24,6 +24,13 @@ set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 set(CMAKE_OBJCXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Link the installed libraries, never invoke the ffmpeg CLI at runtime.
+# A custom installation can be selected using CMAKE_PREFIX_PATH.
+find_path(VTENC_FFMPEG_INCLUDE_DIR libavcodec/avcodec.h REQUIRED)
+foreach(component avformat avcodec avutil)
+    find_library(VTENC_${component}_LIBRARY NAMES ${component} REQUIRED)
+endforeach()
+
 add_library(vtenc_options INTERFACE)
 target_compile_options(vtenc_options INTERFACE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
@@ -42,6 +49,7 @@ configure_file(src/apple/shaders/filter_shader.hpp.in generated/filter_shader.hp
 add_library(vtenc_apple STATIC
     src/apple/encoder.cpp
     src/apple/transcode.cpp
+    src/apple/software_decode.cpp
     src/apple/filter_plan.cpp
     src/apple/bob.cpp
     src/apple/gpu_filter.mm
@@ -51,7 +59,9 @@ add_library(vtenc_apple STATIC
     src/apple/capability_probe.cpp
     src/apple/metal_device.mm)
 target_include_directories(vtenc_apple PUBLIC include PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
-target_link_libraries(vtenc_apple PRIVATE vtenc_options)
+target_include_directories(vtenc_apple SYSTEM PRIVATE "${VTENC_FFMPEG_INCLUDE_DIR}")
+target_link_libraries(vtenc_apple PRIVATE vtenc_options
+    "${VTENC_avformat_LIBRARY}" "${VTENC_avcodec_LIBRARY}" "${VTENC_avutil_LIBRARY}")
 foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox Foundation Metal AVFoundation)
     find_library(VTENC_${framework}_LIBRARY ${framework} REQUIRED)
     target_link_libraries(vtenc_apple PRIVATE "${VTENC_${framework}_LIBRARY}")
@@ -68,6 +78,11 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_COMMAND}" -DVTENC=$<TARGET_FILE:vtenc>
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.cmake")
     set_tests_properties(vtenc.cli PROPERTIES LABELS "cli" TIMEOUT 15)
+    add_executable(vtenc_decode_policy_test tests/decode_policy_test.cpp)
+    target_include_directories(vtenc_decode_policy_test PRIVATE src/apple)
+    target_link_libraries(vtenc_decode_policy_test PRIVATE vtenc_core vtenc_options)
+    add_test(NAME vtenc.decode-policy COMMAND vtenc_decode_policy_test)
+    set_tests_properties(vtenc.decode-policy PROPERTIES LABELS "decode" TIMEOUT 15)
     add_executable(vtenc_bitstream_test tests/bitstream_test.cpp)
     target_include_directories(vtenc_bitstream_test PRIVATE src/apple)
     target_link_libraries(vtenc_bitstream_test PRIVATE vtenc_apple vtenc_core vtenc_options)
