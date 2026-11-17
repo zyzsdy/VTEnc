@@ -55,6 +55,7 @@ OSType source_pixel_format(CMFormatDescriptionRef format, bool allow_interlaced,
         }
         field_coding = value == 2;
     }
+    const bool display_fields = field_coding;
     if (codec == kCMVideoCodecType_H264) {
         const std::uint8_t* sps = nullptr;
         std::size_t size = 0;
@@ -99,7 +100,10 @@ OSType source_pixel_format(CMFormatDescriptionRef format, bool allow_interlaced,
         bits.read(1);
         bits.ue(); // pic_width_in_mbs_minus1
         bits.ue(); // pic_height_in_map_units_minus1
-        field_coding |= !bits.read(1); // frame_mbs_only_flag; MBAFF/field coding capability.
+        // Container field order also describes soft-telecine presentation.
+        // BothFields is a decoder setting for coded fields, not RFF display
+        // fields; progressive SPS pictures must not request that setting.
+        field_coding = !bits.read(1); // frame_mbs_only_flag; MBAFF/field coding capability.
 
     } else if (codec == kCMVideoCodecType_HEVC || codec == 0x68657631U /* hev1 */) {
         const auto config = atom(format, CFSTR("hvcC"));
@@ -113,7 +117,7 @@ OSType source_pixel_format(CMFormatDescriptionRef format, bool allow_interlaced,
         if ((config[2] & 0x1c) != 0x0c) throw std::runtime_error("P2 requires 4:2:0 video chroma");
         depth = (config[2] & 0x40) ? ((config[2] & 0x20) ? 12 : 10) : 8;
     } else throw std::runtime_error("Unsupported source codec");
-    if (field_coding && !allow_interlaced) throw std::runtime_error("Interlaced video requires --deinterlace bob or --vpp-ivtc");
+    if ((field_coding || display_fields) && !allow_interlaced) throw std::runtime_error("Interlaced video requires --deinterlace bob or --vpp-ivtc");
     if (interlaced_coding) *interlaced_coding = field_coding;
     const auto range = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FullRangeVideo);
     const bool full = range && CFEqual(range, kCFBooleanTrue);

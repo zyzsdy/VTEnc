@@ -87,7 +87,20 @@ int main() {
         rejected = false;
         try { (void)vtenc::bob_time(rounded, CMTimeMake(1, 30), 0); } catch (const std::runtime_error&) { rejected = true; }
         require(rejected, "Rounded Bob origin accepted");
-        require(vtenc::ivtc_timescale(30000) == 120000, "Wrong IVTC mux timescale");
+        vtenc::IvtcConfig ivtc;
+        require(vtenc::ivtc_output_timescale(30000, ivtc) == 1440000, "Wrong RFF/IVTC mux timescale");
+        ivtc.cycle = 0;
+        require(vtenc::ivtc_output_timescale(30000, ivtc) == 360000, "Wrong RFF-only mux timescale");
+        ivtc.expand = vtenc::RffExpansion::off;
+        require(vtenc::ivtc_output_timescale(30000, ivtc) == 30000, "Match-only changed mux timescale");
+        ivtc.cycle = 5;
+        require(vtenc::ivtc_output_timescale(30000, ivtc) == 120000, "Wrong hard IVTC mux timescale");
+        for (int fields : {2, 3, 4, 6}) {
+            const auto duration = CMTimeMake(2500, 60000);
+            const auto part = vtenc::ivtc_divide(duration, fields);
+            require(!CMTIME_HAS_BEEN_ROUNDED(part) && CMTimeCompare(CMTimeMultiply(part, fields), duration) == 0,
+                    "RFF field division lost precision");
+        }
         for (auto duration : {CMTimeMake(5005, 30000), CMTimeMake(12, 25), CMTimeMake(2, 90)}) {
             auto quarter = vtenc::ivtc_quarter(duration);
             require(!CMTIME_HAS_BEEN_ROUNDED(quarter) && CMTimeCompare(CMTimeMultiply(quarter, 4), duration) == 0,
@@ -98,9 +111,10 @@ int main() {
             try { (void)vtenc::ivtc_quarter(duration); } catch (const std::runtime_error&) { rejected = true; }
             require(rejected, "Invalid IVTC interval accepted");
         }
-        for (int scale : {0, -1, std::numeric_limits<int>::max() / 4 + 1}) {
+        ivtc.expand = vtenc::RffExpansion::automatic;
+        for (int scale : {0, -1, std::numeric_limits<int>::max() / 48 + 1}) {
             rejected = false;
-            try { (void)vtenc::ivtc_timescale(scale); } catch (const std::runtime_error&) { rejected = true; }
+            try { (void)vtenc::ivtc_output_timescale(scale, ivtc); } catch (const std::runtime_error&) { rejected = true; }
             require(rejected, "Overflowing IVTC mux clock accepted");
         }
         vtenc::IvtcScores scores{};

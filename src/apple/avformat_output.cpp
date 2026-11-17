@@ -133,7 +133,7 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
     s.video = avformat_new_stream(s.mux, nullptr);
     if (!s.video) throw std::bad_alloc();
     const int scale = config.filter.bob ? bob_timescale(info.video_timescale) :
-        (config.filter.ivtc.enabled && config.filter.ivtc.cycle == 5 ? ivtc_timescale(info.video_timescale) : info.video_timescale);
+        (config.filter.ivtc.enabled ? ivtc_output_timescale(info.video_timescale, config.filter.ivtc) : info.video_timescale);
     s.video->time_base = {1, scale};
     auto* p = s.video->codecpar;
     const auto dimensions = CMVideoFormatDescriptionGetDimensions(format);

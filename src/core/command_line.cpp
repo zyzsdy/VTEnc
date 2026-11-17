@@ -31,9 +31,16 @@ void parse_ivtc(std::string_view value, IvtcConfig& config) {
         if (equal == std::string_view::npos) throw std::invalid_argument("--vpp-ivtc requires key=value pairs");
         const auto key = pair.substr(0, equal), text = pair.substr(equal + 1);
         if (!keys.insert(key).second) throw std::invalid_argument("Duplicate --vpp-ivtc parameter: " + std::string(key));
-        if (key == "log") {
-            if (text != "true" && text != "false") throw std::invalid_argument("--vpp-ivtc log requires true or false");
-            config.log = text == "true";
+        if (key == "log" || key == "mixed" || key == "expand") {
+            if (key == "expand") {
+                if (text == "auto") config.expand = RffExpansion::automatic;
+                else if (text == "on") config.expand = RffExpansion::on;
+                else if (text == "off") config.expand = RffExpansion::off;
+                else throw std::invalid_argument("--vpp-ivtc expand requires auto, on or off");
+            } else {
+                if (text != "true" && text != "false") throw std::invalid_argument("--vpp-ivtc " + std::string(key) + " requires true or false");
+                (key == "log" ? config.log : config.mixed) = text == "true";
+            }
             if (comma == std::string_view::npos) break;
             value.remove_prefix(comma + 1);
             if (value.empty()) throw std::invalid_argument("Empty --vpp-ivtc parameter");
@@ -381,11 +388,19 @@ is removed after filtering. RGB and constant-luminance YCbCr are unsupported.
 --vpp-ivtc performs Metal C/P/N field matching for hard telecine before other
 filters. Parameters: cycle=5 (drop one per five) or 0 (match only), post=2
 (adaptive residual repair) or 0, nt=10, cthresh=4, combpel=8, dthresh=7.
+expand=auto|on|off (default auto) expands per-picture repeat fields in Metal.
+mixed=true|false (default false) preserves progressive video and drops only
+convincing clean duplicates in soft/hard telecine cycles; output may be VFR.
+expand=off,mixed=true retains soft coded-picture intervals without expansion.
 log=true writes per-frame decisions to stderr (default false).
 Thresholds use 8-bit units; combpel is 1..128, other thresholds 0..255.
 Full cycles retain their original time span; incomplete tails retain all frames.
-Use --field-order tff|bff when metadata is missing or varies. Raw input, RFF
-expansion, mixed-mode routing and other NVEnc IVTC parameters are unsupported.
+Use --field-order tff|bff for hard rasters when metadata is missing or varies;
+original RFF flags retain their per-picture field order. Mixed mode requires
+per-picture metadata. Native H.264 parses SEI without software decoding;
+unavailable native metadata follows the explicit decode failure/retry policy.
+HEVC picture-timing SEI is rejected: neither public FFmpeg API retains its RFF.
+Raw IVTC input, cadence lock and other NVEnc IVTC parameters are unsupported.
 Interlaced input requires explicit --vpp-ivtc or --deinterlace bob. Bob produces
 two Metal outputs per input. Auto field order requires unambiguous metadata; tff/bff overrides it.
 Bob requires height and vertical crop margins divisible by four, keeps telecine

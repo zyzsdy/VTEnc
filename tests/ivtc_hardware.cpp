@@ -154,6 +154,175 @@ public:
 private:
     int depth_; unsigned first_; int count_,phase_,index_=0; bool vfr_;
 };
+struct Picture {
+    int top, bottom, repeat = 0;
+    unsigned first = 0;
+    bool interlaced = false;
+};
+class Pictures final : public DecodedFrames {
+public:
+    Pictures(std::vector<Picture> list, int depth, bool cfr=false) : list_(std::move(list)), depth_(depth), cfr_(cfr) {}
+    std::unique_ptr<DecodedFrame> next() override {
+        if (index_ == list_.size()) return nullptr;
+        const auto& picture = list_[index_++];
+        auto image = film(picture.top,depth_); const auto bottom = film(picture.bottom,depth_);
+        for (int p=0;p<2;++p) for (int y=1;y<height/(p+1);y+=2)
+            std::copy_n(bottom[static_cast<std::size_t>(p)].begin()+y*width,width,image[static_cast<std::size_t>(p)].begin()+y*width);
+        auto pixel=upload(image,depth_);
+        const auto duration=CMTimeMake(cfr_ ? 2500 : 1001*(2+picture.repeat),60000);
+        const FrameCadence cadence{known,picture.interlaced,picture.repeat,picture.first ? FieldOrder::bff : FieldOrder::tff};
+        auto frame=std::make_unique<DecodedFrame>(DecodedFrame{std::move(pixel),pts_,
+            omit_final_duration && index_==list_.size() ? kCMTimeInvalid : duration,cadence});
+        pts_=CMTimeAdd(pts_,duration); return frame;
+    }
+    CMTime pts_=CMTimeMake(1,5);
+    bool known=true, omit_final_duration=false;
+private:
+    std::vector<Picture> list_; int depth_; bool cfr_; std::size_t index_=0;
+};
+std::vector<Picture> soft_pictures(int count,unsigned first) {
+    std::vector<Picture> result;
+    for(int i=0;i<count;++i) {
+        result.push_back({i,i,i%2==0 ? 1:0,first,false});
+        if(i%2==0) first^=1;
+    }
+    return result;
+}
+int rff_tests() {
+    int cases=0;
+    for(int depth : {8,10}) for(unsigned first : {0U,1U}) {
+        FilterConfig config; config.ivtc.enabled=true;
+        volatile std::sig_atomic_t cancelled=0;
+        RffFrames expanded(std::make_unique<Pictures>(soft_pictures(4,first),depth),config,cancelled);
+        // Independent field-list oracle for three/two/three/two display fields.
+        const int source_id[]={0,0,0,1,1,2,2,2,3,3};
+        int n=0;
+        while(auto frame=expanded.next()) {
+            const int a=source_id[n*2], b=source_id[n*2+1];
+            auto expected=film(first ? b:a,depth), other=film(first ? a:b,depth);
+            for(int p=0;p<2;++p) for(int y=1;y<height/(p+1);y+=2)
+                std::copy_n(other[static_cast<std::size_t>(p)].begin()+y*width,width,expected[static_cast<std::size_t>(p)].begin()+y*width);
+            require(download(frame->pixel.get(),depth)==expected,"RFF expanded field pair differs from display field list");
+            require(CMTimeCompare(frame->pts,CMTimeAdd(CMTimeMake(1,5),CMTimeMake(n*1001,30000)))==0,"RFF expansion PTS incorrect");
+            require(CMTimeCompare(frame->duration,CMTimeMake(1001,30000))==0,"RFF expanded duration incorrect");
+            ++n;
+        }
+        require(n==5,"Four coded RFF pictures must expand to five display rasters"); ++cases;
+        for(bool mixed : {false,true}) for(bool cfr : {false,true}) {
+            auto fixture=upload(film(0,depth),depth); CMVideoFormatDescriptionRef raw=nullptr;
+            check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr,fixture.get(),&raw),"Describe soft telecine"); CFRef format(raw);
+            config.ivtc.mixed=mixed;
+            // Explicit hard-raster interpretation must not overwrite alternating
+            // bitstream first-field flags used by the RFF expansion stage.
+            config.field_order=first ? FieldOrder::bff : FieldOrder::tff;
+            IvtcFrames frames(std::make_unique<Pictures>(soft_pictures(16,first),depth,cfr),format.get(),config,cancelled);
+            int count=0;
+            while(auto frame=frames.next()) {
+                require(download(frame->pixel.get(),depth)==film(count,depth),"Soft IVTC lost/repeated a coded movie picture");
+                const auto period=CMTimeMake(cfr ? 2500:25025,cfr ? 60000:600000);
+                require(CMTimeCompare(frame->duration,period)==0,"Soft IVTC output is not expected CFR");
+                require(CMTimeCompare(frame->pts,CMTimeAdd(CMTimeMake(1,5),CMTimeMultiply(period,count)))==0,"Soft IVTC PTS drift");
+                ++count;
+            }
+            require(count==16,"Soft IVTC decimated already coded film twice"); ++cases;
+        }
+    }
+    // Unmatched final field, full-frame repetition, mixed transition and VFR.
+    for(int count=1;count<=7;++count) {
+        auto source=std::make_unique<Pictures>(soft_pictures(count,0),8); auto* input=source.get();
+        FilterConfig config; config.ivtc.enabled=true; volatile std::sig_atomic_t cancelled=0;
+        RffFrames frames(std::move(source),config,cancelled);
+        auto end=CMTimeMake(1,5); int fields=0;
+        while(auto frame=frames.next()) {
+            require(CMTimeCompare(end,frame->pts)==0,"RFF tail gap/overlap");
+            end=CMTimeAdd(frame->pts,frame->duration); ++fields;
+        }
+        require(CMTimeCompare(end,input->pts_)==0,"RFF tail truncated display duration");
+        require(fields==((count*2+(count+1)/2)+1)/2,"RFF wrong partial display count"); ++cases;
+    }
+    for(int repeat : {2,4}) {
+        FilterConfig config; config.ivtc.enabled=true; volatile std::sig_atomic_t cancelled=0;
+        RffFrames frames(std::make_unique<Pictures>(std::vector<Picture>{{0,0,repeat,0,false}},10),config,cancelled);
+        int count=0; while(auto frame=frames.next()) { require(download(frame->pixel.get(),10)==film(0,10),"Full-frame repeat corrupted pixels"); ++count; }
+        require(count==1+repeat/2,"Wrong full-frame repetition expansion"); ++cases;
+    }
+    // Shift the progressive/soft/hard transitions through every cycle offset.
+    for(int depth : {8,10}) for(unsigned first : {0U,1U}) for(int prefix=1;prefix<=5;++prefix) {
+        std::vector<Picture> list;
+        for(int i=0;i<prefix;++i) list.push_back({i,i,0,first,false});
+        auto soft=soft_pictures(8,first);
+        for(auto p:soft) { p.top+=prefix; p.bottom+=prefix; list.push_back(p); }
+        constexpr int a[]={0,1,1,2,3},b[]={0,1,2,3,3};
+        for(int i=0;i<10;++i) {
+            const int top=prefix+8+i/5*4+a[i%5],bottom=prefix+8+i/5*4+b[i%5];
+            list.push_back({first ? bottom:top,first ? top:bottom,0,first,true});
+        }
+        for(int i=prefix+16;i<prefix+21;++i) list.push_back({i,i,0,first,false});
+        auto source=std::make_unique<Pictures>(list,depth); auto* input=source.get();
+        auto fixture=upload(film(0,depth),depth); CMVideoFormatDescriptionRef raw=nullptr;
+        check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr,fixture.get(),&raw),"Describe mixed telecine"); CFRef format(raw);
+        FilterConfig config; config.ivtc.enabled=true; config.ivtc.mixed=true; config.field_order=first ? FieldOrder::bff:FieldOrder::tff;
+        volatile std::sig_atomic_t cancelled=0; IvtcFrames frames(std::move(source),format.get(),config,cancelled);
+        auto end=CMTimeMake(1,5); int count=0;
+        while(auto frame=frames.next()) {
+            require(download(frame->pixel.get(),depth)==film(count,depth),"Mixed soft/hard/progressive route lost movie order");
+            require(CMTimeCompare(end,frame->pts)==0,"Mixed route gap/overlap");
+            end=CMTimeAdd(frame->pts,frame->duration); ++count;
+        }
+        require(count==prefix+21,"Mixed mode decimated progressive video or retained telecine duplicates");
+        require(CMTimeCompare(end,input->pts_)==0,"Mixed mode changed movie end"); ++cases;
+    }
+    auto fixture=upload(film(0,8),8); CMVideoFormatDescriptionRef raw=nullptr;
+    check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr,fixture.get(),&raw),"Describe RFF errors"); CFRef format(raw);
+    for(int scenario=0;scenario<4;++scenario) {
+        auto source=std::make_unique<Pictures>(std::vector<Picture>{{0,0,scenario==0 ? 3:1,0,false}},8);
+        source->known=scenario!=1;
+        source->omit_final_duration=scenario==2;
+        FilterConfig config; config.ivtc.enabled=true; config.ivtc.mixed=scenario!=3;
+        if(scenario==3) config.ivtc.expand=RffExpansion::off;
+        volatile std::sig_atomic_t cancelled=0;
+        bool rejected=false;
+        try { IvtcFrames frames(std::move(source),format.get(),config,cancelled); while(frames.next()) {} }
+        catch(const std::runtime_error&) { rejected=true; }
+        require(rejected,"IVTC accepted invalid repeat/unknown metadata/missing duration/disabled RFF"); ++cases;
+    }
+    // True interlaced video contains two different exposures in every raster.
+    // Residual comb evidence must inhibit five-to-four decimation.
+    std::vector<Picture> video;
+    for(int i=0;i<10;++i) video.push_back({i*2,i*2+1,0,0,true});
+    FilterConfig config; config.ivtc.enabled=true; config.ivtc.mixed=true;
+    volatile std::sig_atomic_t cancelled=0;
+    IvtcFrames frames(std::make_unique<Pictures>(video,8),format.get(),config,cancelled);
+    int count=0; while(frames.next()) ++count;
+    require(count==10,"Mixed IVTC decimated true interlaced video"); ++cases;
+    // A discontinuous first-field order flushes the pending field's half-frame
+    // interval, marks both sides, and never borrows across the discontinuity.
+    RffFrames boundary(std::make_unique<Pictures>(std::vector<Picture>{{0,0,1,0,false},{1,2,0,0,true}},8),config,cancelled);
+    auto end=CMTimeMake(1,5); count=0;
+    while(auto frame=boundary.next()) {
+        require(CMTimeCompare(frame->pts,end)==0,"RFF field discontinuity changed PTS");
+        require(count==0 || frame->cadence.boundary,"RFF field discontinuity lacks boundary marker");
+        end=CMTimeAdd(end,frame->duration); ++count;
+    }
+    require(count==3 && CMTimeCompare(end,CMTimeAdd(CMTimeMake(1,5),CMTimeMake(5005,60000)))==0,
+        "RFF field discontinuity lost display time"); ++cases;
+    std::vector<Picture> parity_change;
+    constexpr int top_ids[]={0,1,1,2,3}, bottom_ids[]={0,1,2,3,3};
+    for(int i=0;i<20;++i) {
+        const int a=i/5*4+top_ids[i%5], b=i/5*4+bottom_ids[i%5];
+        parity_change.push_back({i<10 ? a:b,i<10 ? b:a,0,i<10 ? 0U:1U,true});
+    }
+    IvtcFrames switched(std::make_unique<Pictures>(parity_change,8),format.get(),config,cancelled);
+    count=0;
+    while(auto frame=switched.next()) {
+        require(download(frame->pixel.get(),8)==film(count,8),"Mixed field-order switch lost a film exposure");
+        require(CMTimeCompare(frame->pts,CMTimeAdd(CMTimeMake(1,5),CMTimeMake(count*1001,24000)))==0,
+            "Mixed field-order switch changed timeline"); ++count;
+    }
+    require(count==16,"Mixed field-order switch did not drain/reset correctly"); ++cases;
+    return cases;
+}
+
 }
 int main() try {
     int cases=0;
@@ -216,5 +385,6 @@ int main() try {
         require(emitted==count-(cycle==5 ? count/5 : 0),"IVTC incomplete cycle dropped a frame");
         require(CMTimeCompare(end,input->pts_)==0,"IVTC changed VFR end time"); ++cases;
     }
+    cases += rff_tests();
     std::cout << "Metal IVTC: " << cases << " reconstruction, cadence and timeline cases passed\n";
 } catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }

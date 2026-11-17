@@ -11,8 +11,22 @@ struct IvtcScore {
 };
 using IvtcScores = std::array<IvtcScore, 3>; // C, P, N
 [[nodiscard]] unsigned ivtc_select(const IvtcScores& scores);
-[[nodiscard]] std::int32_t ivtc_timescale(std::int32_t source);
 [[nodiscard]] CMTime ivtc_quarter(CMTime duration);
+[[nodiscard]] CMTime ivtc_divide(CMTime duration, int divisor);
+[[nodiscard]] std::int32_t ivtc_output_timescale(std::int32_t source, const IvtcConfig& config);
+
+// Streaming equivalent of the upstream pending-top/pending-bottom RFF schedule.
+// Materializes field pairs in Metal; never duplicates a whole interval's time.
+class RffFrames final : public DecodedFrames {
+public:
+    RffFrames(std::unique_ptr<DecodedFrames> source, const FilterConfig& config,
+              const volatile std::sig_atomic_t& cancelled);
+    ~RffFrames() override;
+    [[nodiscard]] std::unique_ptr<DecodedFrame> next() override;
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 class GpuIvtc {
 public:

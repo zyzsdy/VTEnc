@@ -345,13 +345,17 @@ python3 tests/bob_hardware.py --vtenc build/dev/vtenc
 
 Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/1001p；Bob 本身不做场匹配或去重；还原电影帧请使用下面的 `--vpp-ivtc`。单场重建会损失垂直细节，细线可能闪烁。真实结果和复现边界见 [Bob 验证记录](docs/P3Bob验证.md)。
 
-## Metal IVTC：hard telecine 还原
+## Metal IVTC：soft / hard telecine 还原
 
-`--vpp-ivtc` 针对已包含重复场的 **3:2 hard telecine**：在 Metal 上匹配相邻帧的上下场，完整五帧周期丢弃一帧，将典型的 30000/1001 输入还原为 24000/1001 逐行输出。不适用于把普通 60i 视频直接变成电影帧率；普通交错输入仍使用 Bob。
+`--vpp-ivtc` 在 Metal 上展开 soft telecine 的 RFF 重复场、匹配相邻帧的上下场并去重，将典型的 30000/1001 hard telecine 还原为 24000/1001 逐行输出。软硬 telecine 与普通逐行视频混合时使用 `mixed=true`，按重复证据决定是否降帧，输出可以是 VFR。普通 60i 的完整场运动恢复仍使用 Bob；IVTC 的混合模式仅在源帧率上修复真正交错片段。
 
 ```bash
 ./build/dev/vtenc -i telecine.mp4 -o build/film.mp4 \
   --vpp-ivtc --field-order tff
+
+# 软/硬 telecine 与逐行视频混合，保留源时间轴及音轨
+./build/dev/vtenc -i mixed.mp4 -o build/mixed-film.mp4 \
+  --vpp-ivtc expand=auto,mixed=true
 
 # 显式软解，硬件编码；同时缩放、输出 HEVC 10-bit
 ./build/dev/vtenc -i telecine.mp4 -o build/film10.mp4 --avsw \
@@ -363,11 +367,13 @@ Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/
   --vpp-ivtc cycle=0,post=0,log=true --field-order tff
 ```
 
-参数可省略；重复、未知参数和越界数值直接报错。`--field-order auto|tff|bff` 与 Bob 共用，默认 auto 需要明确且一致的元数据。硬 telecine 的逐帧场标记可能变化，此时使用已知的 tff/bff 覆盖；不猜测场序。IVTC 与 Bob 互斥，仅支持 libavformat 压缩输入。
+参数可省略；重复、未知参数和越界数值直接报错。`--field-order auto|tff|bff` 与 Bob 共用：hard telecine 的逐帧场标记可能变化，此时使用已知的 tff/bff 覆盖；RFF 展开始终优先使用原始逐帧首场标记，不能用固定覆盖值破坏 3:2 交替场序。混合模式允许在边界排空后切换场序。IVTC 与 Bob 互斥，仅支持 libavformat 压缩输入。
 
 | 参数 | 默认值 | 范围及含义 |
 | --- | --- | --- |
-| `cycle` | 5 | 5：每五帧丢一帧；0：只匹配和修复 |
+| `cycle` | 5 | 5：每五个显示帧最多丢一帧；0：只匹配和修复，不去重 |
+| `expand` | auto | auto/on：按逐帧 RFF 标记展开；off：关闭展开。on 不凭空生成重复场 |
+| `mixed` | false | true：保留干净逐行帧，只在干净匹配且有明显重复的周期去重；false：显式 3:2，每完整周期固定去一帧 |
 | `post` | 2 | 2：修复残留梳齿；0：关闭修复 |
 | `nt` | 10 | 0–255，匹配评分的噪声门限 |
 | `cthresh` | 4 | 0–255，评分的单像素梳齿门限 |
@@ -379,14 +385,17 @@ Bob 保留 hard telecine 的重复场，输出 60000/1001p，不还原为 24000/
 
 移植参考 [NVEnc IVTC](https://github.com/rigaya/NVEnc/blob/5bb35d860bc5f877b01fe60e4de5ac756b9b80ed/NVEncCore/NVEncFilterIvtc.cu)，MIT 声明保留于 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。处理如下：
 
-- 固定源场序，对 C（当前帧）、P（当前首场＋前帧次场）、N（后帧首场＋当前次场）计算亮度的五行插值误差与梳齿计数。32×8 分块后按梳齿块数量、最大块计数、裁剪均值、匹配误差排序；指标由 GPU 计算，CPU 仅汇总块统计和调度。
+- 按当前显示帧场序，对 C（当前帧）、P（当前首场＋前帧次场）、N（后帧首场＋当前次场）计算亮度的五行插值误差与梳齿计数。32×8 分块后按梳齿块数量、最大块计数、裁剪均值、匹配误差排序；指标由 GPU 计算，CPU 仅汇总块统计和调度。
 - 保留上游 N→P 重复场对保护，并增加干净 P→N 候选间的连续性约束，避免压缩噪声导致漏掉一个电影时刻。首帧不借未来首场取代片段开头；相邻原始帧亮度 SAD 超过最大可能值的 20% 时禁止跨该边界借场。
 - Y 和交织 UV 在 Metal 上按同一场选择重组；残余梳齿的最大块计数达到 65 时，`post=2` 使用上游三帧时空自适应插值与像素门控。支持 NV12/P010 的 limited/full range，源高度至少 8 且为 4 的倍数。10-bit 按码值缩放门限并保持 P010 高位布局。
-- 对合成帧计算亮度 SAD，每完整五帧周期移除与前一合成帧最相似的一帧，包含跨周期边界比较。初始帧没有前帧，不参与首次最小差值丢帧。静止周期的并列最小值按先后顺序选择。
+- 对合成帧计算亮度 SAD，选择与前一合成帧最相似的重复帧，包含跨周期边界比较。初始帧没有前帧，不参与首次最小差值丢帧。混合模式要求无残余梳齿、存在展开/交错证据，最小 SAD 不超过最大可能 SAD 的 0.5%；未展开的周期还要求最小差值不超过周期最大差值的 1/5。证据不足保留全部帧。
+- 参考上游 pending-field 调度，将每个编码图片按 `2 + repeat_pict` 个显示场拆分，再用 Metal 重组相邻异奇偶场。支持额外 0/1/2/4 场；保留跨图片的待配对场，使用有界缓存，无需全片预扫描。源场序不连续或 EOF 剩余单场时输出诊断，以该场的源图片承载剩余时间区间，并标记边界，禁止跨边界匹配/去重。
 
-IVTC 在裁剪、缩放和色彩转换之前执行。每个完整周期按原始首尾时间均分为四个输出，整数有理数计算，保留非零 PTS 起点与周期总时长；CFR 输入得到 4/5 帧率，VFR 保留每周期时长。尾部不足五帧全部输出并保留原区间，避免拉长片尾。封装视频时间基扩大四倍，不能精确表示时明确失败。音轨继续按原时间轴逐包复制。`-o -` 的码流与 stderr 诊断分离；启动 stdout 封装后仍禁止从头重试。
+IVTC 在裁剪、缩放和色彩转换之前执行。决定去重的完整周期按原始首尾时间均分为四个输出，整数有理数计算，保留非零 PTS 起点与周期总时长；纯 hard telecine CFR 输入得到 4/5 帧率，soft telecine 先展开再还原，混合/VFR 保留每周期时长。尾部不足五帧全部输出并保留原区间，避免拉长片尾。RFF 将每个编码图片的原始时间区间按场数精确拆分，既支持 3/2 场变时长标记也支持固定编码图片时长。启用展开时封装时间基预留 12 倍精度，`cycle=5` 再扩大四倍，超出 CoreMedia 32-bit 时间基范围时明确失败。音轨继续按原时间轴逐包复制。`-o -` 的码流与 stderr 诊断分离；启动 stdout 封装后仍禁止从头重试。
 
-这是上游算法的 **hard-telecine 核心路径移植**，不宣称所有 NVEnc 参数或输出逐位兼容。没有移植 RFF soft-telecine 预扫描/展开、混合模式路由、cadence lock、双场序置信度分类或五帧 BWDIF；这些参数不会被静默接受。软解检测到 repeat-picture 元数据时明确拒绝 IVTC。`cycle=5` 是显式 3:2 假设，不自动识别逐行、PAL 或混合帧率素材；`cycle=0` 可用于不降帧的场匹配。压缩破坏、剪辑打断和真正交错片段中的不可恢复场仍可能需要插值。
+逐帧元数据来自 libavcodec 解码帧，或原生 H.264 路径的 FFmpeg 元数据解析器；硬解路径不启用隐藏的软件解码。H.264 RFF 标记随编码包关联到解码图片，再按 PTS 排序。HEVC 的 picture-timing SEI 暂不支持：当前 FFmpeg 的公开 frame/parser API 会丢失 3:2 `pic_struct`，因此软解、硬解均明确拒绝，不假装成功。无 picture-timing SEI 的普通逐行 HEVC/AV1 仍可硬解；其他原生逐帧元数据不可用的解码错误遵循现有显式诊断/重试策略。`expand=off,mixed=true` 可保留 soft telecine 的原编码图片区间；已知纯 hard telecine 可用 `expand=off` 跳过原生 RFF 解析。
+
+这不是完整 NVEnc 兼容层：未移植全片预扫描、cadence lock、双场序置信度分类或五帧 BWDIF，未强制上游式全片 CFR。混合分类是保守的局部像素/元数据判断，不能保证所有噪声、字幕、静止段和剪辑断点都恢复严格电影 cadence；证据不足或不足五帧时允许保留重复。`mixed=false,cycle=5` 仍明确假设 3:2；`cycle=0` 保留展开后的显示帧数量。压缩破坏和真正交错片段中的不可恢复场仍可能需要插值。
 
 显式运行相关验证：
 
@@ -395,9 +404,10 @@ ctest --preset dev -R '^vtenc.cli$'
 ctest --preset dev -R '^vtenc.timeline$'
 ./build/dev/vtenc_ivtc_test
 python3 tests/ivtc_hardware.py --vtenc build/dev/vtenc
+python3 tests/rff_hardware.py --vtenc build/dev/vtenc
 ```
 
-2026-11-17 本机已通过 90 个 IVTC 数值/调度用例和 9 个端到端输出，原始 telecine 的 180→144 帧恢复平均 PSNR 为 43.34 dB；详见 [Metal IVTC 验证记录](docs/MetalIVTC验证.md)。
+2026-11-17 本机验证覆盖 IVTC/RFF 数值与调度、原有 9 个 hard-telecine 输出和新增 12 个 soft/mixed 码流输出及 HEVC 元数据拒绝用例；原始 telecine 的 180→144 帧恢复平均 PSNR 为 43.34 dB。详见 [Metal IVTC 验证记录](docs/MetalIVTC验证.md)。
 
 ## 代码布局
 

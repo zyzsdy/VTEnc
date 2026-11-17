@@ -13,17 +13,20 @@ The implementation is ported to C++20 / Metal; no CUDA runtime is included.
 ## NVEnc IVTC algorithms
 
 `src/apple/shaders/ivtc.metal`, the `GpuIvtc` implementation in
-`src/apple/gpu_filter.mm`, and `src/apple/ivtc.cpp` adapt hard-telecine C/P/N
+`src/apple/gpu_filter.mm`, `src/apple/ivtc.cpp`, and `src/apple/rff.cpp` adapt C/P/N
 field scoring, synthesis, residual repair, block reduction, SAD decimation and
-match-transition protection from `NVEncCore/NVEncFilterIvtc.cu` and
+match-transition protection, pending-field RFF scheduling and mixed routing
+concepts from `NVEncCore/NVEncFilterIvtc.cu` and
 `NVEncCore/NVEncFilterIvtc.cpp` in
 [rigaya/NVEnc](https://github.com/rigaya/NVEnc/tree/5bb35d860bc5f877b01fe60e4de5ac756b9b80ed),
 revision `5bb35d860bc5f877b01fe60e4de5ac756b9b80ed`.
 Tests in `tests/ivtc_hardware.cpp` include scalar references to these formulas.
 The implementation uses Metal and C++20, with no CUDA runtime. It implements
-an explicitly documented hard-telecine subset, not NVEnc's complete RFF,
-BWDIF, confidence classification, or mixed-mode pipeline. VTEnc additionally
-protects clean P-to-N transitions and retains exact source cycle intervals.
+an explicitly documented streaming RFF/hard-telecine subset, not NVEnc's complete
+pre-scan, BWDIF, cadence lock, confidence classification, or mixed-mode pipeline.
+VTEnc additionally protects clean P-to-N transitions, conservatively gates mixed
+cycle decimation, and retains exact source picture/cycle intervals rather than
+forcing a global CFR schedule.
 
 The following MIT license applies to both NVEnc adaptations above.
 

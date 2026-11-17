@@ -48,7 +48,10 @@ struct ColorspaceConfig {
 enum class ColorRange { automatic, limited, full };
 enum class ChromaLocation { automatic, left, center, top_left };
 
+enum class RffExpansion { automatic, on, off };
 struct IvtcConfig {
+    RffExpansion expand = RffExpansion::automatic;
+    bool mixed = false;
     bool enabled = false;
     bool log = false;
     int cycle = 5; // 0: field matching only; 5: hard 3:2 telecine.

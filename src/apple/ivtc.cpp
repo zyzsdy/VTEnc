@@ -24,19 +24,22 @@ unsigned ivtc_select(const IvtcScores& scores) {
     for (unsigned i = 1; i < scores.size(); ++i) if (rank(scores[i]) < rank(scores[best])) best = i;
     return best;
 }
-std::int32_t ivtc_timescale(std::int32_t source) {
-    if (source <= 0 || source > std::numeric_limits<std::int32_t>::max() / 4)
-        throw std::runtime_error("IVTC quarter-frame timescale exceeds CoreMedia's positive 32-bit range");
-    return source * 4;
-}
-CMTime ivtc_quarter(CMTime duration) {
+CMTime ivtc_divide(CMTime duration, int divisor) {
     exact(duration);
-    if (duration.value <= 0) throw std::runtime_error("IVTC requires positive cycle duration");
-    const auto divisor = std::gcd(duration.value, std::int64_t{4});
-    const auto factor = 4 / divisor;
+    if (duration.value <= 0 || divisor <= 0) throw std::runtime_error("IVTC requires positive duration and divisor");
+    const auto common = std::gcd(duration.value, static_cast<std::int64_t>(divisor));
+    const auto factor = divisor / common;
     if (duration.timescale > std::numeric_limits<std::int32_t>::max() / factor)
-        throw std::runtime_error("IVTC cycle duration cannot be divided exactly within CoreMedia timescale");
-    return CMTimeMake(duration.value / divisor, static_cast<std::int32_t>(duration.timescale * factor));
+        throw std::runtime_error("IVTC duration cannot be divided exactly within CoreMedia timescale");
+    return CMTimeMake(duration.value / common, static_cast<std::int32_t>(duration.timescale * factor));
+}
+CMTime ivtc_quarter(CMTime duration) { return ivtc_divide(duration, 4); }
+std::int32_t ivtc_output_timescale(std::int32_t source, const IvtcConfig& config) {
+    // lcm(2,3,4,6) for field expansion, then four-way cycle redistribution.
+    const int factor = (config.expand == RffExpansion::off ? 1 : 12) * (config.cycle == 5 ? 4 : 1);
+    if (source <= 0 || source > std::numeric_limits<std::int32_t>::max() / factor)
+        throw std::runtime_error("IVTC/RFF output timescale exceeds CoreMedia's positive 32-bit range");
+    return source * factor;
 }
 struct IvtcFrames::Impl {
     std::unique_ptr<DecodedFrames> source;
@@ -63,8 +66,15 @@ struct IvtcFrames::Impl {
         }
         std::vector<std::unique_ptr<DecodedFrame>> cycle;
         std::vector<std::uint64_t> differences;
+        bool expanded = false, telecine = false, residual = false;
         const auto length = config.ivtc.cycle == 0 ? 1U : 5U;
         while (current && cycle.size() < length && !cancelled) {
+            if (config.ivtc.mixed && !current->cadence.known)
+                throw std::runtime_error("IVTC mixed mode requires per-picture cadence metadata from the decoder");
+            if (current->cadence.boundary) {
+                if (!cycle.empty()) break;
+                previous.reset(); last_matched.reset(); field.reset(); last_match = 0;
+            }
             exact(current->pts);
             auto duration = following ? CMTimeSubtract(following->pts, current->pts) : current->duration;
             if (!following && (!CMTIME_IS_NUMERIC(duration) || duration.value == 0) && CMTIME_IS_NUMERIC(previous_interval)) {
@@ -77,12 +87,35 @@ struct IvtcFrames::Impl {
             previous_interval = duration;
             const auto cur = current->pixel.get();
             auto prev = previous ? previous->pixel.get() : cur;
-            auto next = following ? following->pixel.get() : cur;
+            auto next = following && !following->cadence.boundary ? following->pixel.get() : cur;
             unsigned first = 0;
-            try { first = bob_first_field(config.field_order, format.get(), cur); }
-            catch (const std::runtime_error& error) { throw std::runtime_error(std::string("IVTC field order: ") + error.what()); }
-            if (field && *field != first) throw std::runtime_error("IVTC field order changed; specify --field-order tff|bff for a consistent woven raster");
+            const auto& cadence = current->cadence;
+            const bool progressive = cadence.known && !cadence.interlaced && !cadence.expanded;
+            if (cadence.expanded) first = cadence.first == FieldOrder::bff ? 1U : 0U;
+            else if (config.field_order != FieldOrder::automatic) first = config.field_order == FieldOrder::bff ? 1U : 0U;
+            else if (progressive) first = field.value_or(0U); // C is invariant to parity.
+            else if (cadence.known && cadence.first != FieldOrder::automatic) first = cadence.first == FieldOrder::bff ? 1U : 0U;
+            else {
+                try { first = bob_first_field(config.field_order, format.get(), cur); }
+                catch (const std::runtime_error& error) { throw std::runtime_error(std::string("IVTC field order: ") + error.what()); }
+            }
+            if (field && *field != first) {
+                if (!config.ivtc.mixed) throw std::runtime_error("IVTC field order changed; specify --field-order tff|bff or mixed=true");
+                if (!cycle.empty()) break;
+                previous.reset(); last_matched.reset(); last_match = 0; prev = cur;
+            }
             field = first;
+            if (config.ivtc.mixed && following) {
+                const auto& upcoming = following->cadence;
+                std::optional<unsigned> next_first;
+                if (upcoming.expanded) next_first = upcoming.first == FieldOrder::bff ? 1U : 0U;
+                else if (config.field_order != FieldOrder::automatic) next_first = config.field_order == FieldOrder::bff ? 1U : 0U;
+                else if (upcoming.known && upcoming.interlaced && upcoming.first != FieldOrder::automatic)
+                    next_first = upcoming.first == FieldOrder::bff ? 1U : 0U;
+                // The next fill drains/resets on a parity change. The last
+                // picture of this section must not borrow across it either.
+                if (next_first && *next_first != first) next = cur;
+            }
             if (!gpu) gpu = std::make_unique<GpuIvtc>(cur, config.ivtc);
             // A hard scene cut must not lend a field or temporal repair pixels.
             const auto type = CVPixelBufferGetPixelFormatType(cur);
@@ -107,13 +140,20 @@ struct IvtcFrames::Impl {
             // their rank). Keep P through that ambiguity; a combed P releases it.
             if (previous && last_match == 1 && match == 2 && scores[1].maximum < 65 &&
                 scores[1].comb <= scores[2].comb + 6) match = 1;
+            const bool direct = config.ivtc.mixed && ((progressive && scores[0].maximum < 65) ||
+                (cadence.repeat_fields > 0 && config.ivtc.expand == RffExpansion::off));
+            if (direct) match = 0;
+            expanded |= cadence.expanded;
+            telecine |= !direct && (cadence.interlaced || scores[0].maximum >= 65);
+            residual |= scores[match].maximum >= 65;
             last_match = match;
             // Conservative block gate; per-pixel residual gate remains in the kernel.
-            const bool repair = config.ivtc.post == 2 && scores[match].maximum >= 65;
+            const bool repair = !direct && config.ivtc.post == 2 && scores[match].maximum >= 65;
             auto matched = gpu->synthesize(prev, cur, next, first, match, repair);
             differences.push_back(last_matched ? gpu->difference(last_matched->get(), matched.get()) : std::numeric_limits<std::uint64_t>::max());
             if (config.ivtc.log) {
                 std::cerr << "vtenc: ivtc frame=" << input_index << " match=" << "CPN"[match] << " repair=" << repair
+                          << " section=" << (cadence.expanded ? "rff" : direct ? "progressive" : "match")
                           << " sad=" << differences.back();
                 for (const auto& score : scores) std::cerr << " [" << score.blocks << ',' << score.maximum << ',' << score.comb << ',' << score.match << ']';
                 std::cerr << '\n';
@@ -129,7 +169,21 @@ struct IvtcFrames::Impl {
         if (cancelled || cycle.empty()) return;
         int drop = -1;
         if (config.ivtc.cycle == 5 && cycle.size() == 5) {
-            drop = static_cast<int>(std::min_element(differences.begin(), differences.end()) - differences.begin());
+            const auto minimum = *std::min_element(differences.begin(), differences.end());
+            std::uint64_t largest = 0;
+            for (auto value : differences) if (value != std::numeric_limits<std::uint64_t>::max()) largest = std::max(largest, value);
+            const auto pixel = cycle.front()->pixel.get();
+            const auto type = CVPixelBufferGetPixelFormatType(pixel);
+            const bool ten = type == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange || type == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
+            const auto duplicate_limit = static_cast<std::uint64_t>(CVPixelBufferGetWidth(pixel)) * CVPixelBufferGetHeight(pixel) * (ten ? 1023U : 255U) / 200;
+            // Mixed video must not lose a unique progressive/interlaced exposure.
+            // Require a clean match and a convincing duplicate; explicit hard
+            // mode retains the original unconditional five-to-four behavior.
+            const bool duplicate = minimum <= duplicate_limit && (expanded || (largest > 0 && minimum <= largest / 5));
+            if (!config.ivtc.mixed || (!residual && (expanded || telecine) && duplicate))
+                drop = static_cast<int>(std::min_element(differences.begin(), differences.end()) - differences.begin());
+        }
+        if (drop >= 0) {
             const auto start = cycle.front()->pts;
             const auto end = CMTimeAdd(cycle.back()->pts, cycle.back()->duration);
             exact(end);
@@ -150,7 +204,7 @@ struct IvtcFrames::Impl {
 };
 IvtcFrames::IvtcFrames(std::unique_ptr<DecodedFrames> source, CMFormatDescriptionRef format,
                      const FilterConfig& config, const volatile std::sig_atomic_t& cancelled)
-    : impl_(std::make_unique<Impl>(std::move(source), format, config, cancelled)) {}
+    : impl_(std::make_unique<Impl>(std::make_unique<RffFrames>(std::move(source), config, cancelled), format, config, cancelled)) {}
 IvtcFrames::~IvtcFrames() = default;
 std::unique_ptr<DecodedFrame> IvtcFrames::next() {
     auto& s = *impl_;

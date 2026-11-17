@@ -2,6 +2,7 @@
 
 #include "cf_ref.hpp"
 #include "media_io.hpp"
+#include "frame_cadence.hpp"
 #include <CoreVideo/CoreVideo.h>
 
 namespace vtenc {
@@ -10,6 +11,7 @@ struct DecodedFrame {
     CFRef<CVPixelBufferRef> pixel;
     CMTime pts;
     CMTime duration;
+    FrameCadence cadence{};
 };
 
 class DecodedFrames {

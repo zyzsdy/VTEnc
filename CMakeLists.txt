@@ -57,6 +57,8 @@ add_library(vtenc_apple STATIC
     src/apple/filter_plan.cpp
     src/apple/bob.cpp
     src/apple/ivtc.cpp
+    src/apple/rff.cpp
+    src/apple/cadence_parser.cpp
     src/apple/gpu_filter.mm
     src/apple/source_format.cpp
     src/apple/avformat_input.cpp

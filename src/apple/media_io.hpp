@@ -12,6 +12,8 @@ struct AVRational;
 
 namespace vtenc {
 
+struct FrameCadence;
+
 struct MediaCancelled {};
 struct PacketDeleter { void operator()(AVPacket* packet) const noexcept; };
 using PacketPtr = std::unique_ptr<AVPacket, PacketDeleter>;
@@ -37,7 +39,7 @@ public:
     ~ContainerInput();
     [[nodiscard]] const MediaInfo& info() const;
     // Returns +1 compressed samples, or null on clean end of that track.
-    [[nodiscard]] CMSampleBufferRef read_video();
+    [[nodiscard]] CMSampleBufferRef read_video(FrameCadence* cadence = nullptr);
     [[nodiscard]] PacketPtr read_audio();
     [[nodiscard]] PacketPtr read_video_packet();
     [[nodiscard]] const AVCodecParameters* video_parameters() const;

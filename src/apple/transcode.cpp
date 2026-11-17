@@ -83,7 +83,7 @@ public:
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
         VTDecompressionOutputCallbackRecord callback{&receive, this};
         check_status(VTDecompressionSessionCreate(kCFAllocatorDefault, format_.get(), specification.get(), attributes.get(),
-            &callback, &session_), allow_interlaced ? "VTDecompressionSessionCreate [hardware required; woven source; hardware required]"
+            &callback, &session_), allow_interlaced ? "VTDecompressionSessionCreate [hardware required; woven source]"
                                       : "VTDecompressionSessionCreate [hardware required]");
         if (!session_) throw std::runtime_error("No hardware decompression session returned");
         // Guard creation's remaining operations, because a throwing constructor has no destructor.
@@ -176,8 +176,8 @@ private:
 
 class DisplayFrames final : public DecodedFrames {
 public:
-    DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled, bool allow_interlaced)
-        : input_(input), cancelled_(cancelled), decoder_(input.hardware_video_format(), allow_interlaced) {}
+    DisplayFrames(ContainerInput& input, const volatile std::sig_atomic_t& cancelled, bool allow_interlaced, bool read_cadence)
+        : input_(input), cancelled_(cancelled), decoder_(input.hardware_video_format(), allow_interlaced), read_cadence_(read_cadence) {}
     std::unique_ptr<Frame> next() override {
         while (!cancelled_) {
             if (!frames_.empty() && (eof_ || frames_.size() >= 32)) {
@@ -190,7 +190,8 @@ public:
                 return frame;
             }
             if (eof_) return nullptr;
-            auto raw = input_.read_video();
+            FrameCadence cadence;
+            auto raw = input_.read_video(read_cadence_ ? &cadence : nullptr);
             if (!raw) { decoder_.finish(); eof_ = true; continue; }
             CFRef sample(raw);
             if (CMSampleBufferGetNumSamples(sample.get()) != 1) throw std::runtime_error("Expected one compressed video frame per sample buffer; got " + std::to_string(CMSampleBufferGetNumSamples(sample.get())));
@@ -203,6 +204,7 @@ public:
             // omit initial DTS; never substitute reordered PTS for missing DTS.
             auto frame = decoder_.decode(sample.get());
             if (frame) {
+                frame->cadence = cadence;
                 if (CMTIME_IS_NUMERIC(input_.info().video_range.start) && CMTimeCompare(frame->pts, input_.info().video_range.start) < 0) continue;
                 if (frames_.size() >= 32) throw std::runtime_error("Video reorder queue exceeds P2's 32-frame limit");
                 frames_.push_back(std::make_unique<Frame>(std::move(*frame)));
@@ -216,6 +218,7 @@ private:
     ContainerInput& input_;
     const volatile std::sig_atomic_t& cancelled_;
     HardwareDecoder decoder_;
+    bool read_cadence_;
     std::vector<std::unique_ptr<Frame>> frames_;
     CMTime last_pts_ = kCMTimeInvalid;
     bool eof_ = false;
@@ -227,7 +230,8 @@ public:
         : input_(input), config_(std::move(config)), cancelled_(cancelled) {
         validate_source(input.info().video_format, config_.filter.bob || config_.filter.ivtc.enabled, config_.filter.colorspace.enabled);
         if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input, cancelled);
-        else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob || config_.filter.ivtc.enabled);
+        else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob || config_.filter.ivtc.enabled,
+            config_.filter.ivtc.enabled && (config_.filter.ivtc.expand != RffExpansion::off || config_.filter.ivtc.mixed));
         if (config_.filter.ivtc.enabled) frames_ = std::make_unique<IvtcFrames>(std::move(frames_), input.info().video_format, config_.filter, cancelled);
         current_ = frames_->next();
         if (!current_) {

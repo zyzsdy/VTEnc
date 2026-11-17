@@ -156,8 +156,6 @@ struct SoftwareFrames::Impl {
         }
     }
     CFRef<CVPixelBufferRef> pixels() {
-        if (ivtc && frame->repeat_pict != 0)
-            throw std::runtime_error("IVTC received repeat-picture metadata (soft telecine); RFF expansion is unsupported");
         if (frame->flags & AV_FRAME_FLAG_CORRUPT || frame->decode_error_flags) {
             throw std::runtime_error("FFmpeg returned a corrupt/concealed decoded frame");
         }
@@ -191,8 +189,8 @@ struct SoftwareFrames::Impl {
         } else if (layout != format || pixel_type != type) {
             throw std::runtime_error("Software decoded pixel format/range changed mid-stream");
         }
-        // The scheduler holds at most current + following; cap allocation as well.
-        const int limit = 3;
+        // RFF lookahead and a pending repeated field may retain extra sources.
+        const int limit = ivtc ? 8 : 3;
         CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &limit));
         const void* keys[] = {kCVPixelBufferPoolAllocationThresholdKey};
         const void* values[] = {number.get()};
@@ -250,7 +248,7 @@ struct SoftwareFrames::Impl {
         check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, raw, &description), "Describe software decoded frame");
         CFRef current(description);
         if (!frame_format) frame_format.emplace(std::move(current));
-        else if (!CMFormatDescriptionEqual(current.get(), frame_format->get())) {
+        else if (!ivtc && !CMFormatDescriptionEqual(current.get(), frame_format->get())) {
             throw std::runtime_error("Software decoded video metadata changed mid-stream at PTS=" + std::to_string(frame->pts));
         }
         return pixel;
@@ -296,7 +294,9 @@ std::unique_ptr<DecodedFrame> SoftwareFrames::next() {
             // The scheduler derives all but the final duration from adjacent PTS.
             // A missing final duration is rejected there, never guessed from FPS.
             auto pixel = s.pixels();
-            return std::make_unique<DecodedFrame>(DecodedFrame{std::move(pixel), pts, duration});
+            const FrameCadence cadence{true, (s.frame->flags & AV_FRAME_FLAG_INTERLACED) != 0,
+                s.frame->repeat_pict, (s.frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) ? FieldOrder::tff : FieldOrder::bff};
+            return std::make_unique<DecodedFrame>(DecodedFrame{std::move(pixel), pts, duration, cadence});
         }
         s.check(result == AVERROR(EAGAIN) ? 0 : result, "avcodec_receive_frame [software]");
         if (s.draining) throw std::runtime_error("FFmpeg requested more input after decoder drain");
