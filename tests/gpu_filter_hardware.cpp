@@ -2,6 +2,7 @@
 // reference used only for verification, never linked into VTEnc's processing path.
 #include "gpu_filter.hpp"
 #include "encoder_session.hpp"
+#include "colorspace_reference.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -72,15 +73,19 @@ std::array<double, 3> reference(const Image& input, double x, double y, const En
         v = interpolate(input, 2, (x - cx) / 2, field_y, config.filter.crop, field);
     }
     const double factor = input.depth == 10 ? 4 : 1, max = input.depth == 10 ? 1023 : 255;
-    yy = (yy - (input.full ? 0 : 16 * factor)) / (input.full ? max : 219 * factor);
-    u = (u - 128 * factor) / (input.full ? max : 224 * factor);
-    v = (v - 128 * factor) / (input.full ? max : 224 * factor);
+    const bool input_full = config.filter.input_range == ColorRange::automatic ? input.full : config.filter.input_range == ColorRange::full;
+    yy = (yy - (input_full ? 0 : 16 * factor)) / (input_full ? max : 219 * factor);
+    u = (u - 128 * factor) / (input_full ? max : 224 * factor);
+    v = (v - 128 * factor) / (input_full ? max : 224 * factor);
     if (convert) {
-        const bool from601 = config.filter.input_matrix == ColorMatrix::bt601;
-        const double kr = from601 ? 0.299 : 0.2126, kb = from601 ? 0.114 : 0.0722;
-        const double r = yy + (2 - 2 * kr) * v, b = yy + (2 - 2 * kb) * u;
-        const double g = (yy - kr * r - kb * b) / (1 - kr - kb);
-        const double out_kr = from601 ? 0.2126 : 0.299, out_kb = from601 ? 0.0722 : 0.114;
+        const auto [kr, kb] = color_reference::coefficients(config.filter.input_matrix);
+        double r = yy + (2 - 2 * kr) * v, b = yy + (2 - 2 * kb) * u;
+        double g = (yy - kr * r - kb * b) / (1 - kr - kb);
+        if (color_reference::nonlinear(config.filter.colorspace)) {
+            const auto rgb = color_reference::transform({r,g,b}, config.filter.colorspace);
+            r = rgb[0]; g = rgb[1]; b = rgb[2];
+        }
+        const auto [out_kr, out_kb] = color_reference::coefficients(config.filter.output_matrix);
         yy = out_kr * r + (1 - out_kr - out_kb) * g + out_kb * b;
         u = (b - yy) / (2 - 2 * out_kb); v = (r - yy) / (2 - 2 * out_kr);
     }
@@ -106,7 +111,12 @@ int verify(const Image& image, CVPixelBufferRef output, const EncodeConfig& conf
         for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
             const double xx = crop[0] + (plane ? 2 * x + 0.5 : x + 0.5) * scale_x;
             const double yy = crop[1] + (plane ? 2 * y + 1.0 : y + 0.5) * scale_y;
-            const auto expected = reference(image, xx, yy, config, convert, field)[static_cast<std::size_t>(plane)];
+            auto expected = reference(image, xx, yy, config, convert, field)[static_cast<std::size_t>(plane)];
+            if (plane && color_reference::nonlinear(config.filter.colorspace)) {
+                expected = (reference(image, xx, yy - scale_y * .5, config, convert, field)[static_cast<std::size_t>(plane)] +
+                            reference(image, xx, yy + scale_y * .5, config, convert, field)[static_cast<std::size_t>(plane)]) / 2;
+            }
+            require(std::isfinite(expected), "Nonfinite colorspace reference");
             const int max = config.video.bit_depth == 10 ? 1023 : 255;
             const int code = static_cast<int>(std::round(std::clamp(expected, 0.0, static_cast<double>(max))));
             const auto row = base + static_cast<std::size_t>(y) * stride;
@@ -194,6 +204,85 @@ int main() try {
         try { (void)bounded.process(pixel.get()); } catch (const std::runtime_error&) { rejected = true; }
         require(rejected, "Midstream decoded color change was not rejected");
     }
+    int color_cases = 0, color_error = 0;
+    for (int depth : {8, 10}) for (bool full : {false, true}) {
+        Image fixture{18, 16, depth, full, {}};
+        const int max = depth == 10 ? 1023 : 255;
+        for (int plane = 0; plane < 3; ++plane) {
+            const int w = plane ? 9 : 18, h = plane ? 8 : 16;
+            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
+                fixture.planes[static_cast<std::size_t>(plane)].push_back((x*67+y*29+plane*101) % (max+1));
+        }
+        auto pixel = pixel_buffer(fixture);
+        CMVideoFormatDescriptionRef raw = nullptr;
+        check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr, pixel.get(), &raw), "Describe colorspace fixture");
+        CFRef format(raw);
+        for (auto from : {ColorTransfer::linear, ColorTransfer::bt709, ColorTransfer::srgb, ColorTransfer::pq, ColorTransfer::hlg})
+        for (auto to : {ColorTransfer::linear, ColorTransfer::bt709, ColorTransfer::srgb, ColorTransfer::pq, ColorTransfer::hlg})
+        for (bool scene : {false, true}) {
+            EncodeConfig config;
+            config.video.bit_depth = depth == 8 ? 10 : 8;
+            config.filter.range = full ? ColorRange::limited : ColorRange::full;
+            config.filter.input_range = full ? ColorRange::limited : ColorRange::full; // Explicit reinterpretation.
+            config.filter.input_chroma = ChromaLocation::center;
+            config.filter.input_matrix = ColorMatrix::bt2020nc;
+            config.filter.output_matrix = ColorMatrix::bt709;
+            config.filter.crop = {2,4,4,4}; config.filter.output_size = {10,6};
+            auto& color = config.filter.colorspace;
+            color.enabled = true; color.input_transfer = from; color.output_transfer = to; color.scene_ref = scene;
+            color.sdr_source_peak = scene ? 203.0F : 100.0F;
+            color.input_primaries = ColorPrimaries::bt2020; color.output_primaries = ColorPrimaries::bt709;
+            GpuFilter filter(make_filter_plan(config, format.get(), pixel.get()));
+            auto output = filter.process(pixel.get());
+            const auto error = verify(fixture, output.get(), config, true);
+            if (error > 1) throw std::runtime_error("Colorspace GPU mismatch: " + std::to_string(error) +
+                " from=" + std::to_string(static_cast<int>(from)) + " to=" + std::to_string(static_cast<int>(to)) + " scene=" + std::to_string(scene));
+            color_error = std::max(color_error,error); ++color_cases;
+            const auto check_attachment = [&](CFStringRef key, CFStringRef expected) {
+                auto raw_value = CVBufferCopyAttachment(output.get(), key, nullptr);
+                require(raw_value, "Missing colorspace output attachment"); CFRef value(raw_value);
+                require(CFEqual(value.get(),expected), "Wrong colorspace output attachment");
+            };
+            check_attachment(kCVImageBufferTransferFunctionKey, CVTransferFunctionGetStringForIntegerCodePoint(static_cast<int>(to)));
+            check_attachment(kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2);
+            check_attachment(kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+        }
+        // Identity must preserve code values, including PQ superwhite/negative RGB
+        // excursions, instead of forcing a lossy gamma round trip.
+        for (auto transfer : {ColorTransfer::linear, ColorTransfer::bt709, ColorTransfer::srgb, ColorTransfer::pq, ColorTransfer::hlg}) {
+            EncodeConfig config;
+            config.video.bit_depth = depth;
+            config.filter.range = full ? ColorRange::full : ColorRange::limited;
+            config.filter.input_chroma = ChromaLocation::left;
+            config.filter.input_matrix = config.filter.output_matrix = ColorMatrix::bt2020nc;
+            auto& color = config.filter.colorspace;
+            color.enabled = true; color.input_transfer = color.output_transfer = transfer;
+            color.input_primaries = color.output_primaries = ColorPrimaries::bt2020;
+            GpuFilter filter(make_filter_plan(config,format.get(),pixel.get()));
+            auto output = filter.process(pixel.get());
+            require(verify(fixture,output.get(),config,false) == 0, "Identity colorspace changed code values");
+            ++color_cases;
+        }
+        // P3 gamut conversion, all supported matrices, and nonlinear Bob sampling.
+        for (auto matrix : {ColorMatrix::bt601, ColorMatrix::bt709, ColorMatrix::smpte240m, ColorMatrix::bt2020nc}) {
+            EncodeConfig config;
+            config.video.bit_depth = depth; config.filter.bob = true;
+            config.filter.range = full ? ColorRange::full : ColorRange::limited;
+            config.filter.input_matrix = matrix; config.filter.output_matrix = ColorMatrix::bt709;
+            config.filter.input_chroma = ChromaLocation::left;
+            auto& color = config.filter.colorspace;
+            color.enabled = true; color.input_transfer = ColorTransfer::srgb; color.output_transfer = ColorTransfer::bt709;
+            color.input_primaries = ColorPrimaries::display_p3; color.output_primaries = ColorPrimaries::bt709;
+            GpuFilter filter(make_filter_plan(config,format.get(),pixel.get()));
+            for (int field : {0,1}) {
+                auto output = filter.process(pixel.get(),field);
+                auto error = verify(fixture,output.get(),config,true,field);
+                require(error <= 1, "P3/Bob colorspace mismatch");
+                color_error = std::max(color_error,error); ++color_cases;
+            }
+        }
+    }
+    std::cout << "PASS " << color_cases << " colorspace pixel cases; maximum error=" << color_error << " code value\n";
     int bob_cases = 0, bob_error = 0;
     for (int depth : {8, 10}) for (bool full : {false, true}) {
         Image fixture{18, 16, depth, full, {}};

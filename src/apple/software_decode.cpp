@@ -63,6 +63,7 @@ struct SoftwareFrames::Impl {
     bool draining = false;
     bool ended = false;
     bool bob;
+    bool colorspace;
     FieldOrder field_order;
     const MediaInfo& info;
     const volatile std::sig_atomic_t& cancelled;
@@ -73,7 +74,7 @@ struct SoftwareFrames::Impl {
     OSType pixel_type = 0;
 
     Impl(ContainerInput& source, const FilterConfig& filter, const volatile std::sig_atomic_t& stop)
-        : input(source), bob(filter.bob), field_order(filter.field_order), info(source.info()), cancelled(stop) {}
+        : input(source), bob(filter.bob), colorspace(filter.colorspace.enabled), field_order(filter.field_order), info(source.info()), cancelled(stop) {}
     ~Impl() {
         av_frame_free(&frame);
         avcodec_free_context(&decoder);
@@ -157,9 +158,9 @@ struct SoftwareFrames::Impl {
         if (frame->flags & AV_FRAME_FLAG_CORRUPT || frame->decode_error_flags) {
             throw std::runtime_error("FFmpeg returned a corrupt/concealed decoded frame");
         }
-        if (frame->color_trc == AVCOL_TRC_SMPTE2084 || frame->color_trc == AVCOL_TRC_ARIB_STD_B67 ||
+        if ((!colorspace && (frame->color_trc == AVCOL_TRC_SMPTE2084 || frame->color_trc == AVCOL_TRC_ARIB_STD_B67)) ||
             av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_METADATA) || av_frame_get_side_data(frame, AV_FRAME_DATA_DOVI_RPU_BUFFER)) {
-            throw std::runtime_error("HDR and Dolby Vision input are not supported by the SDR pipeline");
+            throw std::runtime_error("HDR requires --vpp-colorspace; Dolby Vision input is not supported");
         }
         if ((frame->flags & AV_FRAME_FLAG_INTERLACED) && !bob) {
             throw std::runtime_error("Interlaced video requires --deinterlace bob");

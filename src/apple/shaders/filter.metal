@@ -9,6 +9,10 @@ struct Parameters {
     float input_kr, input_kb, output_kr, output_kb;
     uint convert_matrix;
     uint bob, field;
+    uint convert_transfer, input_transfer, output_transfer, scene_ref;
+    float linear_peak;
+    float gamut[9];
+    float input_luma[3], output_luma[3];
 };
 // Explicit float interpolation avoids hardware sampler fractional-weight quantization
 // when converting 8-bit textures to 10-bit output.
@@ -50,10 +54,20 @@ float3 sample_yuv(texture2d<float, access::read> y, texture2d<float, access::rea
     float3 value((yy * p.input_storage - p.input_y_offset) / p.input_y_scale,
                  (cc * p.input_storage - p.input_c_offset) / p.input_c_scale);
     if (!p.convert_matrix) return value;
-    // Nonlinear R'G'B': matrix conversion only, no gamut or transfer conversion.
+    // Keep matrix-only conversion in nonlinear R'G'B'; enter linear light only when needed.
     float r = value.x + 2.0f * (1.0f - p.input_kr) * value.z;
     float b = value.x + 2.0f * (1.0f - p.input_kb) * value.y;
     float g = (value.x - p.input_kr * r - p.input_kb * b) / (1.0f - p.input_kr - p.input_kb);
+    if (p.convert_transfer) {
+        float3 rgb = to_linear(float3(r, g, b), p.input_transfer, p.scene_ref, p.linear_peak,
+            float3(p.input_luma[0], p.input_luma[1], p.input_luma[2]));
+        rgb = float3(dot(rgb, float3(p.gamut[0], p.gamut[1], p.gamut[2])),
+                     dot(rgb, float3(p.gamut[3], p.gamut[4], p.gamut[5])),
+                     dot(rgb, float3(p.gamut[6], p.gamut[7], p.gamut[8])));
+        rgb = from_linear(rgb, p.output_transfer, p.scene_ref, p.linear_peak,
+            float3(p.output_luma[0], p.output_luma[1], p.output_luma[2]));
+        r = rgb.r; g = rgb.g; b = rgb.b;
+    }
     float luma = p.output_kr * r + (1.0f - p.output_kr - p.output_kb) * g + p.output_kb * b;
     return float3(luma, (b - luma) / (2.0f * (1.0f - p.output_kb)), (r - luma) / (2.0f * (1.0f - p.output_kr)));
 }
@@ -69,8 +83,18 @@ kernel void filter_frame(texture2d<float, access::read> input_y [[texture(0)]],
     yy = round(clamp(yy * p.output_y_scale + p.output_y_offset, 0.0f, p.output_max)) * p.output_storage;
     output_y.write(float4(yy), index);
     if (index.x < output_uv.get_width() && index.y < output_uv.get_height()) {
-        float2 cc = sample_yuv(input_y, input_uv,
-            start + (float2(index) * 2.0f + float2(0.5f, 1.0f)) * scale, p).yz;
+        float2 cc;
+        if (p.convert_transfer) {
+            // Apply nonlinear conversion before 4:2:0 downsampling. The two
+            // vertical taps preserve the output's left chroma phase.
+            cc = 0.5f * (sample_yuv(input_y, input_uv,
+                start + (float2(index) * 2.0f + float2(0.5f, 0.5f)) * scale, p).yz +
+                sample_yuv(input_y, input_uv,
+                start + (float2(index) * 2.0f + float2(0.5f, 1.5f)) * scale, p).yz);
+        } else {
+            cc = sample_yuv(input_y, input_uv,
+                start + (float2(index) * 2.0f + float2(0.5f, 1.0f)) * scale, p).yz;
+        }
         cc = round(clamp(cc * p.output_c_scale + p.output_c_offset, 0.0f, p.output_max)) * p.output_storage;
         output_uv.write(float4(cc, 0.0f, 1.0f), index);
     }

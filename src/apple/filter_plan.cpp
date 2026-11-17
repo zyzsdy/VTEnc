@@ -1,5 +1,6 @@
 #include "gpu_filter.hpp"
 #include "encoder_session.hpp"
+#include "vtenc/colorspace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -23,11 +24,39 @@ CFTypeRef metadata(CMFormatDescriptionRef format, CFDictionaryRef pixel, CFStrin
 ColorMatrix matrix_value(CFTypeRef value) {
     if (value && CFEqual(value, kCVImageBufferYCbCrMatrix_ITU_R_601_4)) return ColorMatrix::bt601;
     if (value && CFEqual(value, kCVImageBufferYCbCrMatrix_ITU_R_709_2)) return ColorMatrix::bt709;
+    if (value && CFEqual(value, kCVImageBufferYCbCrMatrix_ITU_R_2020)) return ColorMatrix::bt2020nc;
+    if (value && CFEqual(value, kCVImageBufferYCbCrMatrix_SMPTE_240M_1995)) return ColorMatrix::smpte240m;
     return ColorMatrix::automatic;
 }
 CFStringRef matrix_name(ColorMatrix matrix) {
+    if (matrix == ColorMatrix::bt2020nc) return kCVImageBufferYCbCrMatrix_ITU_R_2020;
+    if (matrix == ColorMatrix::smpte240m) return kCVImageBufferYCbCrMatrix_SMPTE_240M_1995;
     return matrix == ColorMatrix::bt601 ? kCVImageBufferYCbCrMatrix_ITU_R_601_4 : kCVImageBufferYCbCrMatrix_ITU_R_709_2;
 }
+ColorTransfer transfer_value(CFTypeRef value) {
+    if (!value || CFGetTypeID(value) != CFStringGetTypeID()) return ColorTransfer::automatic;
+    switch (CVTransferFunctionGetIntegerCodePointForString(static_cast<CFStringRef>(value))) {
+    case 1: case 6: case 14: case 15: return ColorTransfer::bt709;
+    case 8: return ColorTransfer::linear;
+    case 13: return ColorTransfer::srgb;
+    case 16: return ColorTransfer::pq;
+    case 18: return ColorTransfer::hlg;
+    default: return ColorTransfer::automatic;
+    }
+}
+ColorPrimaries primaries_value(CFTypeRef value) {
+    if (!value || CFGetTypeID(value) != CFStringGetTypeID()) return ColorPrimaries::automatic;
+    switch (CVColorPrimariesGetIntegerCodePointForString(static_cast<CFStringRef>(value))) {
+    case 1: return ColorPrimaries::bt709;
+    case 5: return ColorPrimaries::bt470bg;
+    case 6: case 7: return ColorPrimaries::smpte170m;
+    case 9: return ColorPrimaries::bt2020;
+    case 11: return ColorPrimaries::dci_p3;
+    case 12: return ColorPrimaries::display_p3;
+    default: return ColorPrimaries::automatic;
+    }
+}
+
 }
 
 bool needs_gpu_filter(const EncodeConfig& config, CVPixelBufferRef source) {
@@ -56,7 +85,8 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
     const auto size = config.filter.output_size.value_or(std::array<int, 2>{static_cast<int>(cropped_width), static_cast<int>(cropped_height)});
     if (size[0] <= 0 || size[1] <= 0 || size[0] % 2 || size[1] % 2) throw std::runtime_error("GPU output dimensions must be positive and even");
     const auto input_type = CVPixelBufferGetPixelFormatType(source);
-    const auto input = describe(input_type);
+    auto input = describe(input_type);
+    if (config.filter.input_range != ColorRange::automatic) input.full = config.filter.input_range == ColorRange::full;
     const bool full = config.filter.range == ColorRange::automatic ? input.full : config.filter.range == ColorRange::full;
     if (config.video.bit_depth != 8 && config.video.bit_depth != 10) throw std::runtime_error("GPU output depth must be 8 or 10");
     const OSType output_type = config.video.bit_depth == 10
@@ -69,18 +99,45 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
         if (auto value = metadata(format, source_attachments.get(), key)) CFDictionarySetValue(attachments.get(), key, value);
     }
     const auto transfer = metadata(format, source_attachments.get(), kCVImageBufferTransferFunctionKey);
-    if (transfer && (CFEqual(transfer, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) ||
+    if (!config.filter.colorspace.enabled && transfer && (CFEqual(transfer, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) ||
                      CFEqual(transfer, kCVImageBufferTransferFunction_ITU_R_2100_HLG))) {
-        throw std::runtime_error("GPU filter accepts SDR only; HDR transfer conversion is not implemented");
+        throw std::runtime_error("HDR filtering requires explicit --vpp-colorspace conversion");
     }
     auto input_matrix = config.filter.input_matrix;
     if (input_matrix == ColorMatrix::automatic) input_matrix = matrix_value(metadata(format, source_attachments.get(), kCVImageBufferYCbCrMatrixKey));
     auto output_matrix = config.filter.output_matrix;
     if (output_matrix == ColorMatrix::automatic) output_matrix = input_matrix;
     if (output_matrix != ColorMatrix::automatic && input_matrix == ColorMatrix::automatic) {
-        throw std::runtime_error("Missing or unsupported source YCbCr matrix; specify --input-matrix bt601|bt709");
+        throw std::runtime_error("Missing or unsupported source YCbCr matrix; specify --vpp-colorspace matrix=FROM:TO or --input-matrix");
     }
     if (output_matrix != ColorMatrix::automatic) CFDictionarySetValue(attachments.get(), kCVImageBufferYCbCrMatrixKey, matrix_name(output_matrix));
+    const auto& color = config.filter.colorspace;
+    auto in_transfer = color.input_transfer;
+    if (in_transfer == ColorTransfer::automatic) in_transfer = transfer_value(transfer);
+    const auto out_transfer = color.output_transfer == ColorTransfer::automatic ? in_transfer : color.output_transfer;
+    auto in_primaries = color.input_primaries;
+    if (in_primaries == ColorPrimaries::automatic)
+        in_primaries = primaries_value(metadata(format, source_attachments.get(), kCVImageBufferColorPrimariesKey));
+    const auto out_primaries = color.output_primaries == ColorPrimaries::automatic ? in_primaries : color.output_primaries;
+    const bool linear = in_transfer != out_transfer || in_primaries != out_primaries;
+    if (linear && (in_transfer == ColorTransfer::automatic || out_transfer == ColorTransfer::automatic))
+        throw std::runtime_error("Missing or unsupported source transfer; specify --vpp-colorspace transfer=FROM:TO");
+    if (linear && (input_matrix == ColorMatrix::automatic || output_matrix == ColorMatrix::automatic))
+        throw std::runtime_error("Missing or unsupported source matrix; specify --vpp-colorspace matrix=FROM:TO");
+    if (in_primaries != out_primaries && (in_primaries == ColorPrimaries::automatic || out_primaries == ColorPrimaries::automatic))
+        throw std::runtime_error("Missing or unsupported source primaries; specify --vpp-colorspace colorprim=FROM:TO");
+    if (color.enabled) {
+        if (out_transfer != ColorTransfer::automatic && (color.input_transfer != ColorTransfer::automatic || color.output_transfer != ColorTransfer::automatic)) {
+            const auto name = CVTransferFunctionGetStringForIntegerCodePoint(static_cast<int>(out_transfer));
+            if (!name) throw std::runtime_error("CoreVideo cannot represent output transfer");
+            CFDictionarySetValue(attachments.get(), kCVImageBufferTransferFunctionKey, name);
+        }
+        if (out_primaries != ColorPrimaries::automatic && (color.input_primaries != ColorPrimaries::automatic || color.output_primaries != ColorPrimaries::automatic)) {
+            const auto name = CVColorPrimariesGetStringForIntegerCodePoint(static_cast<int>(out_primaries));
+            if (!name) throw std::runtime_error("CoreVideo cannot represent output primaries");
+            CFDictionarySetValue(attachments.get(), kCVImageBufferColorPrimariesKey, name);
+        }
+    }
     auto chroma = config.filter.input_chroma;
     if (chroma == ChromaLocation::automatic) {
         const auto value = metadata(format, source_attachments.get(), kCVImageBufferChromaLocationTopFieldKey);
@@ -131,11 +188,24 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
     p.output_y_scale = full ? p.output_max : 219 * out_factor;
     p.output_c_offset = 128 * out_factor;
     p.output_c_scale = full ? p.output_max : 224 * out_factor;
-    p.input_kr = input_matrix == ColorMatrix::bt601 ? 0.299F : 0.2126F;
-    p.input_kb = input_matrix == ColorMatrix::bt601 ? 0.114F : 0.0722F;
-    p.output_kr = output_matrix == ColorMatrix::bt601 ? 0.299F : 0.2126F;
-    p.output_kb = output_matrix == ColorMatrix::bt601 ? 0.114F : 0.0722F;
-    p.convert_matrix = input_matrix != output_matrix;
+    if (input_matrix != ColorMatrix::automatic) {
+        const auto in = matrix_coefficients(input_matrix), out = matrix_coefficients(output_matrix);
+        p.input_kr = in[0]; p.input_kb = in[1]; p.output_kr = out[0]; p.output_kb = out[1];
+    }
+    p.convert_matrix = input_matrix != output_matrix || linear;
+    p.convert_transfer = linear;
+    p.input_transfer = static_cast<unsigned>(in_transfer); p.output_transfer = static_cast<unsigned>(out_transfer);
+    p.scene_ref = color.scene_ref; p.linear_peak = color.sdr_source_peak;
+    if (in_primaries != out_primaries) {
+        const auto gamut = gamut_matrix(in_primaries, out_primaries);
+        std::copy(gamut.begin(), gamut.end(), p.gamut);
+    }
+    if (linear && !color.scene_ref && (in_transfer == ColorTransfer::hlg || out_transfer == ColorTransfer::hlg)) {
+        if (in_primaries == ColorPrimaries::automatic || out_primaries == ColorPrimaries::automatic)
+            throw std::runtime_error("Display-referred HLG requires known primaries; specify --vpp-colorspace colorprim=FROM:TO");
+        const auto in = primaries_luma(in_primaries), out = primaries_luma(out_primaries);
+        std::copy(in.begin(), in.end(), p.input_luma); std::copy(out.begin(), out.end(), p.output_luma);
+    }
     p.bob = config.filter.bob;
     CFRetain(attachments.get());
     FilterPlan plan{width, height, size[0], size[1], input_type, output_type, p, CFRef<CFDictionaryRef>(attachments.get()), std::move(source_attachments)};

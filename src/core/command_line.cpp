@@ -1,4 +1,5 @@
 #include "vtenc/command_line.hpp"
+#include "vtenc/colorspace.hpp"
 
 #include <charconv>
 #include <cmath>
@@ -70,7 +71,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         const bool common = arg == "--codec" || arg == "--output-depth";
         if (!common && arg != "--output-format" && arg != "-i" && arg != "-o" && arg != "--input-res" && arg != "--fps" &&
             arg != "--frames" && arg != "--gop-len" && arg != "--bitrate" && arg != "--quality" &&
-            arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
+            arg != "--vpp-colorspace" && arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
             arg != "--input-matrix" && arg != "--output-matrix" && arg != "--input-chroma-loc" && arg != "--deinterlace" && arg != "--field-order") {
             throw std::invalid_argument("Unknown argument: " + std::string(arg));
         }
@@ -92,6 +93,8 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         else if (arg == "--output-format") {
             if (value.starts_with("-")) throw std::invalid_argument("Missing value for --output-format");
             result.encode.output_format = value;
+        } else if (arg == "--vpp-colorspace") {
+            parse_colorspace(value, result.encode.filter);
         } else if (arg == "--deinterlace") {
             if (value != "bob") throw std::invalid_argument("--deinterlace supports only bob");
             result.encode.filter.bob = true;
@@ -110,7 +113,9 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             auto& matrix = arg == "--input-matrix" ? result.encode.filter.input_matrix : result.encode.filter.output_matrix;
             if (value == "bt601") matrix = ColorMatrix::bt601;
             else if (value == "bt709") matrix = ColorMatrix::bt709;
-            else throw std::invalid_argument(std::string(arg) + " requires bt601 or bt709");
+            else if (value == "bt2020nc" || value == "bt2020") matrix = ColorMatrix::bt2020nc;
+            else if (value == "smpte240m") matrix = ColorMatrix::smpte240m;
+            else throw std::invalid_argument(std::string(arg) + " requires bt601, bt709, bt2020nc or smpte240m");
         } else if (arg == "--input-chroma-loc") {
             result.encode.filter.requested = true;
             if (value == "left") result.encode.filter.input_chroma = ChromaLocation::left;
@@ -168,6 +173,9 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             }
             result.encode.quality = quality;
         }
+    }
+    if (seen.contains("--vpp-colorspace") && (seen.contains("--input-matrix") || seen.contains("--output-matrix") || seen.contains("--output-range"))) {
+        throw std::invalid_argument("--vpp-colorspace cannot be combined with --input-matrix, --output-matrix or --output-range; use its matrix/range pairs");
     }
     if (seen.contains("--avhw") && seen.contains("--avsw")) {
         throw std::invalid_argument("--avhw and --avsw are mutually exclusive");
@@ -242,8 +250,9 @@ Usage:
         [--avhw | --avsw]
         [--codec h264|hevc] [--output-depth 8|10] [--audio-copy | --no-audio]
         [--crop LEFT,TOP,RIGHT,BOTTOM] [--output-res WIDTHxHEIGHT]
-        [--output-range limited|full] [--output-matrix bt601|bt709]
-        [--input-matrix bt601|bt709] [--input-chroma-loc left|center|top-left]
+        [--output-range limited|full] [--output-matrix bt601|bt709|bt2020nc|smpte240m]
+        [--input-matrix bt601|bt709|bt2020nc|smpte240m] [--input-chroma-loc left|center|top-left]
+        [--vpp-colorspace KEY=VALUE[,KEY=VALUE]...]
         [--deinterlace bob] [--field-order auto|tff|bff]
         [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
@@ -290,13 +299,27 @@ Output pixel aspect ratio is preserved; explicit output size may stretch the ima
 8/10-bit and range conversion are supported; depth follows --output-depth (default 8).
 Matrix conversion changes YCbCr coefficients only, preserving primaries and transfer.
 Missing matrix/chroma metadata requires an explicit input override when needed.
-No gamut/transfer conversion, tone mapping, dithering or antialiasing downscale.
-SDR only; interlaced input requires explicit --deinterlace bob (Metal, two outputs
+--vpp-colorspace uses NVEnc-style matrix=FROM:TO,transfer=FROM:TO,
+colorprim=FROM:TO,range=FROM:TO pairs. Source auto reads frame/track metadata;
+destination auto preserves the resolved source. Missing required metadata fails.
+Matrix: bt601 (smpte170m/bt470bg), bt709, smpte240m, bt2020nc (bt2020).
+Transfer: bt709 (smpte170m/bt2020-10/bt2020-12), linear, srgb (iec61966-2-1),
+smpte2084 (pq), arib-std-b67 (hlg). Primaries: bt709, smpte170m (smpte240m),
+bt470bg, bt2020, display-p3 (smpte432), dci-p3 (smpte431). Range: limited/full.
+All four pairs accept auto. scene_ref=true|false defaults false: BT.709 uses
+BT.1886 display gamma 2.4; true uses the BT.709 scene OETF. sdr_source_peak=100
+sets linear-light reference luminance in cd/m2; valid range [0.01,10000].
+Cannot combine --vpp-colorspace with --input-matrix/--output-matrix/--output-range.
+HDR input requires explicit --vpp-colorspace. This is colorimetric conversion:
+no tone mapping, LUT3D, gamut compression, dithering or antialiasing downscale.
+Out-of-range output clips at quantization; HDR mastering/content-light metadata
+is removed after filtering. RGB and constant-luminance YCbCr are unsupported.
+Interlaced input requires explicit --deinterlace bob (Metal, two outputs
 per input). Auto field order requires unambiguous metadata; tff/bff overrides it.
 Bob requires height and vertical crop margins divisible by four, keeps telecine
 repeated fields, and is not inverse telecine. Software decoding accepts 8/10-bit
 4:2:0 video; other decoded pixel layouts are rejected.
-HDR and Dolby Vision are rejected.
+Dolby Vision is rejected, including when --vpp-colorspace is enabled.
 Exit codes: 0 success, 1 runtime/hardware failure, 2 invalid arguments, 130 cancelled.
 )";
 }

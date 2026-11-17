@@ -37,13 +37,15 @@ target_compile_options(vtenc_options INTERFACE
     -Werror=unguarded-availability
     "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 
-add_library(vtenc_core STATIC src/core/command_line.cpp)
+add_library(vtenc_core STATIC src/core/command_line.cpp src/core/colorspace.cpp)
 target_include_directories(vtenc_core PUBLIC include)
 target_link_libraries(vtenc_core PRIVATE vtenc_options)
 
 # Embed source so installed CLI needs neither shader files nor the offline Metal compiler.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/apple/shaders/filter.metal)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/apple/shaders/filter.metal src/apple/shaders/colorspace.metal)
 file(READ src/apple/shaders/filter.metal VTENC_GPU_SHADER)
+file(READ src/apple/shaders/colorspace.metal VTENC_COLOR_SHADER)
+string(PREPEND VTENC_GPU_SHADER "${VTENC_COLOR_SHADER}\n")
 configure_file(src/apple/shaders/filter_shader.hpp.in generated/filter_shader.hpp @ONLY)
 
 add_library(vtenc_apple STATIC
@@ -61,7 +63,7 @@ add_library(vtenc_apple STATIC
     src/apple/metal_device.mm)
 target_include_directories(vtenc_apple PUBLIC include PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_include_directories(vtenc_apple SYSTEM PUBLIC "${VTENC_FFMPEG_INCLUDE_DIR}")
-target_link_libraries(vtenc_apple PRIVATE vtenc_options
+target_link_libraries(vtenc_apple PRIVATE vtenc_options vtenc_core
     "${VTENC_avformat_LIBRARY}" "${VTENC_avcodec_LIBRARY}" "${VTENC_avutil_LIBRARY}")
 foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox Foundation Metal)
     find_library(VTENC_${framework}_LIBRARY ${framework} REQUIRED)
@@ -70,8 +72,9 @@ endforeach()
 
 add_executable(vtenc src/cli/main.cpp)
 target_compile_definitions(vtenc PRIVATE VTENC_VERSION="${PROJECT_VERSION}")
-target_link_libraries(vtenc PRIVATE vtenc_core vtenc_apple vtenc_options)
+target_link_libraries(vtenc PRIVATE vtenc_apple vtenc_options)
 install(TARGETS vtenc RUNTIME DESTINATION bin)
+install(FILES THIRD_PARTY_NOTICES.md DESTINATION share/doc/vtenc)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -86,16 +89,21 @@ if(BUILD_TESTING)
     set_tests_properties(vtenc.decode-policy PROPERTIES LABELS "decode" TIMEOUT 15)
     add_executable(vtenc_bitstream_test tests/bitstream_test.cpp)
     target_include_directories(vtenc_bitstream_test PRIVATE src/apple)
-    target_link_libraries(vtenc_bitstream_test PRIVATE vtenc_apple vtenc_core vtenc_options)
+    target_link_libraries(vtenc_bitstream_test PRIVATE vtenc_apple vtenc_options)
     add_test(NAME vtenc.bitstream COMMAND vtenc_bitstream_test "${CMAKE_CURRENT_BINARY_DIR}/test-output")
     set_tests_properties(vtenc.bitstream PROPERTIES LABELS "bitstream" TIMEOUT 15)
+    add_executable(vtenc_colorspace_test tests/colorspace_test.cpp)
+    target_include_directories(vtenc_colorspace_test PRIVATE src/apple)
+    target_link_libraries(vtenc_colorspace_test PRIVATE vtenc_apple vtenc_options)
+    add_test(NAME vtenc.colorspace COMMAND vtenc_colorspace_test)
+    set_tests_properties(vtenc.colorspace PROPERTIES LABELS "colorspace" TIMEOUT 15)
     # Explicit hardware executable: intentionally excluded from default CTest.
     add_executable(vtenc_gpu_filter_test tests/gpu_filter_hardware.cpp)
     target_include_directories(vtenc_gpu_filter_test PRIVATE src/apple)
-    target_link_libraries(vtenc_gpu_filter_test PRIVATE vtenc_apple vtenc_core vtenc_options)
+    target_link_libraries(vtenc_gpu_filter_test PRIVATE vtenc_apple vtenc_options)
     add_executable(vtenc_timeline_test tests/timeline_test.cpp)
     target_include_directories(vtenc_timeline_test PRIVATE src/apple)
-    target_link_libraries(vtenc_timeline_test PRIVATE vtenc_apple vtenc_core vtenc_options)
+    target_link_libraries(vtenc_timeline_test PRIVATE vtenc_apple vtenc_options)
     add_test(NAME vtenc.timeline COMMAND vtenc_timeline_test)
     set_tests_properties(vtenc.timeline PROPERTIES LABELS "timeline" TIMEOUT 15)
 endif()

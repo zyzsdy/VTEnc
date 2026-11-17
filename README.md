@@ -16,7 +16,7 @@
 - 平均码率目标或原生 Quality、GOP 上限、整数有理数帧率；Annex B 输出及逐帧时间戳 CSV。
 - 压缩输入统一交给 `libavformat` 自动探测，不设格式或扩展名白名单；支持实测 MKV、TS、WebM、MP4/MOV 等，探测失败直接报错。原生 VideoToolbox 硬解或 `libavcodec` 软解，原生硬编，avformat 根据输出文件名选择封装器，或由 `-f` / `--output-format` 显式指定；默认复制第一条音轨。
 - 文件转码将源 PTS、VFR、A/V 起点偏移、像素宽高比和显示变换传入封装器，精度与元数据保存取决于目标格式；支持 `hev1` 描述适配。
-- Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709 YCbCr 矩阵转换。
+- Metal 裁剪 / 双线性缩放、NV12/P010 8/10-bit 与 limited/full range 转换、BT.601/BT.709/BT.2020 NCL/SMPTE 240M 矩阵转换，以及 `--vpp-colorspace` 线性光色域、传递函数转换。
 - Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010、硬解或软解的文件输入。两个原始交错样片在本机无法硬解，可用软解接入 Metal Bob。
 - 有界回调和重排队列、背压和排空；SIGINT 取消、失败清理、输出防覆盖。
 - 不依赖硬件编码器的 CLI / 码流适配检查，以及显式硬件集成验证脚本。
@@ -197,7 +197,7 @@ FFmpeg 来自外部安装，本仓库没有复制其上游实现。FFmpeg 的基
 
 视频 PTS 使用整数有理数传递，相邻 PTS 决定显示时长。TS 等容器可能没有末帧 duration：此时明确打印诊断并沿用前一个显示间隔；只有一帧且无 duration 时仍报错。音视频的输入时钟未必能精确映射到封装器选定的输出时钟（例如 MKV 常用 1/1000，TS 使用 1/90000）；写入时采用整数有理数就近舍入，误差不超过半个输出刻度，并首次打印换算诊断。可精确表示时不舍入；输出时钟若把不同视频帧的 PTS 或有效时长压成同一刻度，直接报错。封装器最终可保存的时长、旋转与边信息取决于格式；裸码流没有容器级时间戳。源音频 PTS 不递增、损坏包、流参数变化或目标封装失败均直接退出。
 
-当前限定一个 SDR 视频轨；交错输入必须显式启用 Bob。支持位深、尺寸和基础色彩转换；不支持 HDR / Dolby Vision、音频转码、多音轨选择、字幕、章节与附件。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
+当前限定一个视频轨；HDR 输入必须显式指定 `--vpp-colorspace`，交错输入必须显式启用 Bob。支持位深、尺寸和色彩空间转换；不支持 Dolby Vision、音频转码、多音轨选择、字幕、章节与附件。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
 
 本地文件任务取消或运行错误不发布成品，临时目录自动清理；成功写完 trailer、检查写入错误并关闭文件后，以不覆盖既有文件的方式发布。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
 
@@ -223,15 +223,62 @@ python3 tests/filter_hardware.py --vtenc build/dev/vtenc
 
 这些滤镜用于所有 avformat 压缩输入。处理顺序是裁剪、双线性采样、YCbCr 矩阵 / range / 位深转换。`--crop LEFT,TOP,RIGHT,BOTTOM` 是四个非负偶数边距，必须留有正偶数宽高；坐标基于未应用容器旋转的存储像素。省略 `--output-res` 时输出裁剪后的尺寸，显式指定时精确拉伸到目标偶数宽高，保留源像素宽高比，不自动补黑边。几何变换后 clean aperture 重置为完整输出栅格；容器显示方向保持，平移按新尺寸调整。
 
-`--output-depth` 决定文件输出位深，默认仍为 8；10-bit 文件输入配合默认参数现在会通过 Metal 转成 8-bit。`--output-range limited|full` 默认保留源范围。`--output-matrix bt601|bt709` 默认保留源矩阵，只改变 YCbCr 系数，不改变 primaries / transfer，也不是完整 BT.601/BT.709 色域转换。`--input-matrix` 明确覆盖源矩阵解释；当转换需要矩阵但解码缓冲区和格式描述未提供支持的值时必须指定，不按尺寸猜测。
+`--output-depth` 决定文件输出位深，默认仍为 8；10-bit 文件输入配合默认参数现在会通过 Metal 转成 8-bit。`--output-range limited|full` 默认保留源范围。`--output-matrix bt601|bt709|bt2020nc|smpte240m` 默认保留源矩阵，只改变 YCbCr 系数，不改变 primaries / transfer，也不是完整 BT.601/BT.709 色域转换。`--input-matrix` 明确覆盖源矩阵解释；当转换需要矩阵但解码缓冲区和格式描述未提供支持的值时必须指定，不按尺寸猜测。
 
 支持 left、center、top-left 输入色度位置，Metal 输出统一重采样为 left。优先读取解码缓冲区 / 格式描述；缺失或不支持时需要 `--input-chroma-loc left|center|top-left` 明确解释。转换后的实际码流位深、range、颜色和色度标记会核查，不能仅修改标签冒充转换。
 
 GPU 通过 `CVMetalTextureCache` 映射 IOSurface 兼容缓冲区；生产处理路径不锁定或复制 CPU 像素，无 CPU 滤镜回退。每帧等待 Metal 命令成功完成后提交硬编，保留原 PTS / duration，输出缓冲池最多 3 个。任务结果中的 `Metal GPU frames completed` 统计成功提交硬编的已完成 GPU 帧；无需滤镜且位深相同时为 0。
 
-当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持 HDR、tone mapping、色域 / 传递函数转换、物理旋转、Bicubic/Lanczos、字幕合成和运动自适应反交错。这些仍属于后续工作。
+当前双线性为固定两点插值，不带缩小时的低通抗混叠，不适合作为强缩小的最高质量算法。量化采用舍入，无 dithering；不支持 tone mapping、物理旋转、Bicubic/Lanczos、字幕合成和运动自适应反交错。这些仍属于后续工作。
 
 2026-11-17 已在本机完成 240 组 GPU 逐像素参考比对、`video_samples` 的 11 个成功转码用例和 6 个拒绝用例，以及 P2 回归；详见 [P3 验证记录](docs/P3验证.md)。结果不代表其他硬件、系统或任意尺寸已验证，也不承诺零拷贝或长期吞吐量。
+
+## Metal 色彩空间转换
+
+参考 [NVEnc 的 --vpp-colorspace](https://github.com/rigaya/NVEnc/blob/5bb35d860bc5f877b01fe60e4de5ac756b9b80ed/NVEncC_Options.en.md#--vpp-colorspace-param1value1param2value2)，将核心矩阵、传递函数和色域算法移植为 Metal；许可证和来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。这不是 NVEnc 全部参数的兼容实现。
+
+```bash
+# SDR BT.709 转为 BT.2020 色域与矩阵；保留原传递函数
+./build/dev/vtenc -i input.mp4 -o bt2020.mp4 --codec hevc --output-depth 10 \
+  --vpp-colorspace matrix=auto:bt2020nc,colorprim=auto:bt2020
+
+# PQ BT.2020 转为 BT.709，100 cd/m² 为线性光 1.0；超过输出范围的亮部会裁切
+# 这是色度学转换，不是保留高光层次的 HDR tone mapping
+./build/dev/vtenc -i hdr10.mp4 -o bt709.mp4 --codec hevc --output-depth 10 \
+  --vpp-colorspace matrix=auto:bt709,transfer=auto:bt709,colorprim=auto:bt709,sdr_source_peak=100
+
+# 显式解释源值，并按场景参考的传递曲线转换
+./build/dev/vtenc -i input.mp4 -o converted.mp4 \
+  --vpp-colorspace matrix=smpte170m:bt709,colorprim=smpte170m:bt709,transfer=bt709:srgb,range=limited:full,scene_ref=true
+```
+
+| 参数 | 支持值 |
+| --- | --- |
+| `matrix=源:目标` | `bt601`（`smpte170m` / `bt470bg`）、`bt709`、`smpte240m`、`bt2020nc`（`bt2020`） |
+| `transfer=源:目标` | `bt709`（`smpte170m` / `bt2020-10` / `bt2020-12`）、`linear`、`srgb`（`iec61966-2-1`）、`smpte2084`（`pq`）、`arib-std-b67`（`hlg`） |
+| `colorprim=源:目标` | `bt709`、`smpte170m`（`smpte240m`）、`bt470bg`、`bt2020`、`display-p3`（`smpte432`）、`dci-p3`（`smpte431`） |
+| `range=源:目标` | `limited`、`full` |
+| `scene_ref` | `false`（默认，显示参考）或 `true`（场景参考） |
+| `sdr_source_peak` | 线性光 1.0 对应的亮度，默认 100 cd/m²，范围 `[0.01,10000]` |
+
+四组源/目标参数均支持 `auto`：源从解码帧附件优先、轨道元数据次之读取；目标继承已解析的源值。省略的参数等价于 `auto:auto`。显式源值覆盖解释，目标值用于实际像素变换和输出标签；所需元数据缺失或不支持时直接报错，不按尺寸猜测。与旧的 `--input-matrix` / `--output-matrix` / `--output-range` 互斥，避免顺序相关的覆盖。原始帧路径仍不接受本选项。
+
+转换在浮点 Metal 内核中依次执行：范围归一化 → YCbCr 转 R′G′B′ → 逆传递函数 → 线性 RGB 色域矩阵（需要时做 Bradford 白点适应）→ 目标传递函数 → 目标 YCbCr → 量化。仅矩阵/范围转换和身份转换跳过不必要的传递函数往返。非线性转换后才做垂直两点色度降采样，保持 left 相位；支持与裁剪、缩放、Bob 组合。
+
+与 NVEnc 一致，显示参考 BT.709 使用理想 BT.1886 gamma 2.4；`scene_ref=true` 切换为 BT.709 OETF。PQ 以 10000 cd/m² 归一化；HLG 显示参考采用 1000 cd/m²、gamma 1.2 的亮度相关 OOTF，场景参考采用逆/正 OETF 与 12 倍标度。HLG 在逆 OETF **之后**计算场景线性亮度并应用 OOTF，与参考版本对编码 RGB 先作亮度校正的顺序不同，保证正反变换互逆。PQ 输入负值及超过 1.0 的非法信号先限幅，避免有理式奇点；色域转换不做中间 RGB 限幅，传递函数按自身定义处理负值，最终输出超范围值裁切。
+
+当前没有移植 `hdr2sdr` tone mapping、LUT3D、`approx_gamma` LUT 近似、RGB 平面、YCgCo、BT.2020 constant-luminance 或其他未列出的曲线/基色；请求这些参数会报错。HDR 转 SDR 不会自动压缩高光；HDR 输出只写转换后的矩阵、传递函数、基色和范围，不复制失效的 mastering display / content light 元数据，也不生成新的 HDR10 静态元数据。Dolby Vision 始终拒绝。编码器必须确认输出色彩标记，否则任务失败。
+
+显式验证（不运行全量测试）：
+
+```bash
+ctest --preset dev -R '^vtenc.cli$'
+ctest --preset dev -R '^vtenc.colorspace$'
+./build/dev/vtenc_gpu_filter_test
+python3 tests/colorspace_hardware.py
+```
+
+2026-11-17 本机通过 780 个 GPU 像素用例和 6 个真实码流转换用例，见 [色彩空间验证记录](docs/色彩空间验证.md)。
 
 ## P3 Bob 反交错
 

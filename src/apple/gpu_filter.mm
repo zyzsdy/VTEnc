@@ -76,7 +76,7 @@ CFRef<CVPixelBufferRef> GpuFilter::process(CVPixelBufferRef source, int field) {
                             texture(s.cache->get(), output.get(), 0, true), texture(s.cache->get(), output.get(), 1, true)};
         auto command = [s.queue commandBuffer];
         if (!command) metal_error("Create Metal command buffer", nil);
-        command.label = @"VTEnc Bob / crop / bilinear scale / SDR YCbCr";
+        command.label = @"VTEnc Bob / crop / bilinear scale / colorspace";
         auto encoder = [command computeCommandEncoder];
         if (!encoder) metal_error("Create Metal compute encoder", nil);
         [encoder setComputePipelineState:s.pipeline];

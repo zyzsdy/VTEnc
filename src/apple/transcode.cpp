@@ -31,7 +31,7 @@ bool sample_flag(CMSampleBufferRef sample, CFStringRef key) {
     return value && CFEqual(value, kCFBooleanTrue);
 }
 
-void validate_source(CMFormatDescriptionRef format, bool bob) {
+void validate_source(CMFormatDescriptionRef format, bool bob, bool colorspace) {
     const auto codec = CMFormatDescriptionGetMediaSubType(format);
     if (codec == 0x64766831U || codec == 0x64766865U) throw std::runtime_error("Dolby Vision input is not supported by the P2 SDR pipeline");
     const auto fields = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_FieldCount);
@@ -44,9 +44,9 @@ void validate_source(CMFormatDescriptionRef format, bool bob) {
         if (count == 2 && !bob) throw std::runtime_error("Interlaced video requires --deinterlace bob");
     }
     const auto transfer = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_TransferFunction);
-    if (transfer && (CFEqual(transfer, kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ) ||
+    if (!colorspace && transfer && (CFEqual(transfer, kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ) ||
                      CFEqual(transfer, kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG))) {
-        throw std::runtime_error("HDR input requires an HDR metadata pipeline; P2 accepts SDR only");
+        throw std::runtime_error("HDR input requires explicit --vpp-colorspace conversion");
     }
     const auto atoms = CMFormatDescriptionGetExtension(format, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
     if (atoms && CFGetTypeID(atoms) == CFDictionaryGetTypeID()) {
@@ -224,7 +224,7 @@ class EncodedVideo {
 public:
     EncodedVideo(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
         : input_(input), config_(std::move(config)), cancelled_(cancelled) {
-        validate_source(input.info().video_format, config_.filter.bob);
+        validate_source(input.info().video_format, config_.filter.bob, config_.filter.colorspace.enabled);
         if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input, cancelled);
         else frames_ = std::make_unique<DisplayFrames>(input, cancelled, config_.filter.bob);
         current_ = frames_->next();

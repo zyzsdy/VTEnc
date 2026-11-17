@@ -5,6 +5,8 @@
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
 #include <memory>
+#include <cstddef>
+#include <type_traits>
 
 namespace vtenc {
 // Scalar-only layout shared with Metal. Coordinates are luma pixel edge coordinates.
@@ -17,7 +19,14 @@ struct FilterParameters {
     float input_kr, input_kb, output_kr, output_kb;
     unsigned convert_matrix;
     unsigned bob = 0, field = 0;
+    unsigned convert_transfer = 0, input_transfer = 0, output_transfer = 0, scene_ref = 0;
+    float linear_peak = 100.0F;
+    float gamut[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    float input_luma[3] = {}, output_luma[3] = {};
+
 };
+static_assert(std::is_standard_layout_v<FilterParameters>);
+static_assert(sizeof(FilterParameters) == 184 && offsetof(FilterParameters, convert_transfer) == 104);
 struct FilterPlan {
     int input_width, input_height, width, height;
     OSType input_format, output_format;

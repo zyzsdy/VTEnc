@@ -23,7 +23,18 @@ struct ProbeConfig {
 
 enum class FieldOrder { automatic, tff, bff };
 
-enum class ColorMatrix { automatic, bt601, bt709 };
+// H.273 code points where possible; automatic is never sent to the shader.
+enum class ColorMatrix { automatic = 2, bt709 = 1, bt601 = 6, smpte240m = 7, bt2020nc = 9 };
+enum class ColorTransfer { automatic = 2, bt709 = 1, linear = 8, srgb = 13, pq = 16, hlg = 18 };
+enum class ColorPrimaries { automatic = 2, bt709 = 1, bt470bg = 5, smpte170m = 6,
+                           bt2020 = 9, dci_p3 = 11, display_p3 = 12 };
+struct ColorspaceConfig {
+    bool enabled = false;
+    ColorTransfer input_transfer = ColorTransfer::automatic, output_transfer = ColorTransfer::automatic;
+    ColorPrimaries input_primaries = ColorPrimaries::automatic, output_primaries = ColorPrimaries::automatic;
+    bool scene_ref = false; // NVEnc defaults to display-referred BT.1886 for BT.709.
+    float sdr_source_peak = 100.0F; // cd/m2 represented by linear 1.0, as in NVEnc.
+};
 enum class ColorRange { automatic, limited, full };
 enum class ChromaLocation { automatic, left, center, top_left };
 
@@ -33,6 +44,8 @@ struct FilterConfig {
     std::optional<std::array<int, 2>> output_size;
     std::array<int, 4> crop{}; // left, top, right, bottom in stored luma pixels.
     ColorRange range = ColorRange::automatic;
+    ColorRange input_range = ColorRange::automatic;
+    ColorspaceConfig colorspace;
     ColorMatrix input_matrix = ColorMatrix::automatic;
     ColorMatrix output_matrix = ColorMatrix::automatic;
     ChromaLocation input_chroma = ChromaLocation::automatic;
