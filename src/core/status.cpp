@@ -69,8 +69,14 @@ std::string configuration_json(const EncodeConfig& c, bool transcode) {
       << ",\"width\":" << (transcode ? "null" : std::to_string(c.video.width))
       << ",\"height\":" << (transcode ? "null" : std::to_string(c.video.height))
       << ",\"frames\":" << (transcode ? "null" : std::to_string(c.frames))
-      << ",\"fps\":" << (transcode ? "null" : time_json({c.fps_num, c.fps_den}))
+      << ",\"fps\":" << (transcode && c.sync == SyncMode::vfr ? "null" : time_json({c.fps_num, c.fps_den}))
       << ",\"decoder\":" << json_string(decoder_name(c.decode)) << ",\"copy_audio\":" << c.copy_audio
+      << ",\"avsync\":" << json_string(c.sync == SyncMode::vfr ? "vfr" : c.sync == SyncMode::cfr ? "cfr" : "forcecfr")
+      << ",\"dar\":" << (c.dar ? time_json({(*c.dar)[0], (*c.dar)[1]}) : "null")
+      << ",\"audio_codec\":" << json_string(c.aac_audio ? "aac" : c.copy_audio ? "copy" : "none")
+      << ",\"audio_backend\":" << (c.aac_audio ? "\"audiotoolbox\"" : "null")
+      << ",\"audio_bitrate\":" << (c.aac_audio ? std::to_string(c.audio_bitrate) : "null")
+      << ",\"audio_sample_rate\":" << (c.audio_sample_rate ? std::to_string(c.audio_sample_rate) : "null")
       << ",\"gop\":" << c.gop << ",\"bitrate\":" << (c.quality ? "null" : std::to_string(c.bitrate)) << ",\"quality\":";
     if (c.quality) s << *c.quality; else s << "null";
     s << ",\"require_hardware_encoder\":true,\"frame_reordering\":false,\"realtime\":false,\"filter\":{\"requested\":" << f.requested
@@ -200,7 +206,7 @@ void StatusReporter::capabilities(const EncoderCapabilities& c, std::string_view
     for (std::size_t i = 0; i < c.property_names.size(); ++i) { if (i) s << ','; s << json_string(c.property_names[i]); }
     s << "],\"features\":{\"json_status\":\"available\",\"y4m_420_8_10\":\"available_requires_avsw\","
          "\"software_video_encoding\":\"unsupported_by_design\",\"other_encode_configurations\":\"unverified\","
-         "\"aac_transcode\":\"not_implemented\",\"subtitle_burn\":\"not_implemented\"}";
+         "\"cfr\":\"available_requires_explicit_fps\",\"dar_override\":\"available_orthogonal_transform\",\"aac_transcode\":\"available_audiotoolbox_lc_mono_stereo_44100_48000_file_output\",\"subtitle_burn\":\"not_implemented\"}";
     event("capabilities", s.str());
 }
 DiagnosticBuffer::~DiagnosticBuffer() { if (!pending_.empty()) reporter_.diagnostic(pending_); }

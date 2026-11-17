@@ -3,8 +3,11 @@
 #include "encoder_session.hpp"
 #include "bob.hpp"
 #include "ivtc.hpp"
+#include "timeline.hpp"
+#include "aac_edit.hpp"
 extern "C" {
 #include <libavutil/opt.h>
+#include <libavutil/intreadwrite.h>
 }
 
 #include <algorithm>
@@ -60,7 +63,67 @@ struct ContainerOutput::Impl {
         const auto& s = *static_cast<const Impl*>(opaque);
         return s.cancelled && *s.cancelled;
     }
+    bool verify_aac = false, movie_aac_edit = false;
+    std::int64_t aac_packets = 0, aac_first_pts = 0;
+    std::uint32_t aac_priming = 0, aac_padding = 0;
     bool finished = false;
+    void verify_aac_file() {
+        // No muxer whitelist: verify the actual chosen container before publication.
+        // In particular transport/elementary streams can accept AAC but lose trims.
+        struct Input {
+            AVFormatContext* value = avformat_alloc_context();
+            ~Input() { avformat_close_input(&value); }
+        } check;
+        if (!check.value) throw std::bad_alloc();
+        check.value->interrupt_callback = {&Impl::interrupt, this};
+        av_check(avformat_open_input(&check.value, temporary.c_str(), nullptr, nullptr), "Reopen muxed AAC for timing verification");
+        av_check(avformat_find_stream_info(check.value, nullptr), "Inspect muxed AAC timing");
+        AVStream* stream = nullptr;
+        for (unsigned i = 0; i < check.value->nb_streams; ++i) {
+            if (check.value->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+                if (stream) throw std::runtime_error("AAC mux verification found multiple audio streams");
+                stream = check.value->streams[i];
+            }
+        }
+        if (!stream || stream->codecpar->codec_id != AV_CODEC_ID_AAC ||
+            stream->codecpar->sample_rate != audio->codecpar->sample_rate ||
+            av_channel_layout_compare(&stream->codecpar->ch_layout, &audio->codecpar->ch_layout))
+            throw std::runtime_error("Selected muxer did not preserve AAC format");
+        auto packet = make_packet();
+        std::int64_t count = 0;
+        std::uint32_t leading = 0, trailing = 0;
+        while (true) {
+            if (cancelled && *cancelled) throw MediaCancelled{};
+            const int status = av_read_frame(check.value, packet.get());
+            if (status == AVERROR_EOF) break;
+            av_check(status, "Read muxed AAC for timing verification");
+            if (packet->stream_index == stream->index) {
+                const auto expected = CMTimeAdd(CMTimeMake(aac_first_pts, audio->codecpar->sample_rate),
+                                               CMTimeMake(count * 1024, audio->codecpar->sample_rate));
+                const auto actual = media_time(packet->pts, stream->time_base, "verified AAC PTS");
+                const auto difference = CMTimeAbsoluteValue(CMTimeSubtract(actual, expected));
+                if (count >= aac_packets || !CMTIME_IS_NUMERIC(difference) || CMTIME_HAS_BEEN_ROUNDED(difference) ||
+                    CMTimeCompare(CMTimeMultiply(difference, 2), CMTimeMake(stream->time_base.num, stream->time_base.den)) > 0)
+                    throw std::runtime_error("Selected muxer changed AAC timestamps beyond half an output tick");
+                std::size_t size = 0;
+                const auto* trim = av_packet_get_side_data(packet.get(), AV_PKT_DATA_SKIP_SAMPLES, &size);
+                if (trim) {
+                    if (size != 10) throw std::runtime_error("Invalid muxed AAC trim metadata");
+                    if (AV_RL32(trim) && count != 0) throw std::runtime_error("Unexpected mid-stream AAC priming");
+                    if (AV_RL32(trim + 4) && count != aac_packets - 1) throw std::runtime_error("Unexpected mid-stream AAC padding");
+                    if (count == 0) leading = AV_RL32(trim);
+                    if (count == aac_packets - 1) trailing = AV_RL32(trim + 4);
+                }
+                ++count;
+            }
+            av_packet_unref(packet.get());
+        }
+        if (count != aac_packets || leading != aac_priming ||
+            trailing != aac_padding)
+            throw std::runtime_error("Selected muxer does not preserve AAC priming/padding and valid sample count: packets=" +
+                std::to_string(count) + "/" + std::to_string(aac_packets) + ", priming=" + std::to_string(leading) +
+                "/" + std::to_string(aac_priming) + ", padding=" + std::to_string(trailing) + "/" + std::to_string(aac_padding));
+    }
     bool reported_audio_rescale = false;
     bool reported_video_rescale = false;
     std::int64_t last_video_pts = AV_NOPTS_VALUE;
@@ -97,6 +160,9 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
                                  const volatile std::sig_atomic_t& cancelled)
     : impl_(std::make_unique<Impl>()) {
     auto& s = *impl_;
+    s.verify_aac = config.aac_audio;
+    if (s.verify_aac && config.output == "-")
+        throw std::runtime_error("AAC transcoding requires file output to verify muxed priming/padding before publication; stdout supports audio-copy/no-audio");
     s.destination = config.output;
     s.stdout_output = config.output == "-";
     s.cancelled = &cancelled;
@@ -118,7 +184,7 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
     if (!s.stdout_output) {
         auto pattern = config.output + ".part.XXXXXX";
         if (!mkdtemp(pattern.data())) throw std::runtime_error("Create output directory: " + std::string(std::strerror(errno)));
-        s.directory = std::move(pattern); s.temporary = s.directory + "/media";
+        s.directory = std::move(pattern); s.temporary = s.directory + (config.aac_audio ? "/media.mov" : "/media");
     }
     const auto target = s.stdout_output ? "pipe:1" : s.temporary.c_str();
     av_freep(&s.mux->url);
@@ -129,12 +195,15 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
         return s.mux->priv_data && av_opt_find(s.mux->priv_data, name, nullptr, 0, 0);
     };
     const bool movie_clock = has_option("movie_timescale");
+    s.movie_aac_edit = s.verify_aac && movie_clock && has_option("use_editlist");
     s.mux->avoid_negative_ts = AVFMT_AVOID_NEG_TS_DISABLED;
     s.video = avformat_new_stream(s.mux, nullptr);
     if (!s.video) throw std::bad_alloc();
-    const int scale = config.filter.bob ? bob_timescale(info.video_timescale) :
+    const int filter_scale = config.filter.bob ? bob_timescale(info.video_timescale) :
         (config.filter.ivtc.enabled ? ivtc_output_timescale(info.video_timescale, config.filter.ivtc) : info.video_timescale);
+    const int scale = config.sync == SyncMode::vfr ? filter_scale : timeline_timescale(filter_scale, config.fps_num);
     s.video->time_base = {1, scale};
+    if (config.sync != SyncMode::vfr) s.video->avg_frame_rate = {config.fps_num, config.fps_den};
     auto* p = s.video->codecpar;
     const auto dimensions = CMVideoFormatDescriptionGetDimensions(format);
     p->codec_type = AVMEDIA_TYPE_VIDEO;
@@ -211,8 +280,8 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
     const int status = avformat_write_header(s.mux, &options);
     av_dict_free(&options);
     av_check(status, s.stdout_output
-        ? "avformat_write_header [stdout requires a non-seekable muxer accepting the video codec and copied audio; use --no-audio to omit audio]"
-        : "avformat_write_header [selected muxer must accept the video codec and copied audio; use --no-audio to omit audio]");
+        ? "avformat_write_header [stdout requires a non-seekable muxer accepting the video codec and selected audio; use --no-audio to omit audio]"
+        : "avformat_write_header [selected muxer must accept the video codec and selected audio; use --no-audio to omit audio]");
 }
 ContainerOutput::~ContainerOutput() = default;
 void ContainerOutput::append_video(CMSampleBufferRef sample) {
@@ -240,16 +309,26 @@ void ContainerOutput::append_video(CMSampleBufferRef sample) {
 void ContainerOutput::append_audio(const AVPacket* source) {
     auto& s = *impl_; s.check();
     if (!s.audio) throw std::runtime_error("No audio stream in muxer");
+    if (s.verify_aac) {
+        if (s.aac_packets == 0) s.aac_first_pts = source->pts;
+        std::size_t size = 0;
+        const auto* trim = av_packet_get_side_data(source, AV_PKT_DATA_SKIP_SAMPLES, &size);
+        if (trim && size == 10) {
+            if (s.aac_packets == 0) s.aac_priming = AV_RL32(trim);
+            s.aac_padding = AV_RL32(trim + 4);
+        }
+        ++s.aac_packets;
+    }
     auto packet = make_packet();
-    av_check(av_packet_ref(packet.get(), source), "Reference copied audio packet");
+    av_check(av_packet_ref(packet.get(), source), "Reference selected audio packet");
     const auto audio_ticks = [&](std::int64_t value, const char* context) {
         return s.ticks(media_time(value, s.source_audio_base, context), s.audio, s.reported_audio_rescale, "audio");
     };
     packet->pts = audio_ticks(source->pts, "audio PTS");
     packet->dts = source->dts == AV_NOPTS_VALUE ? packet->pts : audio_ticks(source->dts, "audio DTS");
-    packet->duration = audio_ticks(source->duration, "audio duration");
+    packet->duration = audio_ticks(s.movie_aac_edit ? 1024 : source->duration, "audio duration");
     packet->pos = -1; packet->stream_index = s.audio->index;
-    av_check(av_interleaved_write_frame(s.mux, packet.get()), "av_interleaved_write_frame [audio copy; use --no-audio if unsupported]");
+    av_check(av_interleaved_write_frame(s.mux, packet.get()), "av_interleaved_write_frame [audio; use --no-audio if unsupported]");
     s.check();
 }
 std::uint64_t ContainerOutput::finish(const volatile std::sig_atomic_t& cancelled) {
@@ -266,8 +345,12 @@ std::uint64_t ContainerOutput::finish(const volatile std::sig_atomic_t& cancelle
         if (written <= 0) throw std::runtime_error("Stdout output is empty or its byte count is invalid");
         return static_cast<std::uint64_t>(written);
     }
+    if (s.movie_aac_edit) finalize_aac_edit(s.temporary, s.audio->codecpar->sample_rate,
+        s.aac_first_pts, s.aac_packets, s.aac_priming, s.aac_padding);
     const auto bytes = std::filesystem::file_size(s.temporary);
     if (!bytes) throw std::runtime_error("Container output is empty");
+    if (s.verify_aac && !s.movie_aac_edit) s.verify_aac_file();
+    if (cancelled) return 0;
     if (link(s.temporary.c_str(), s.destination.c_str()) != 0) throw std::runtime_error("Publish container [" + s.destination + "]: " + std::strerror(errno));
     return bytes;
 }

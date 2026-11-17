@@ -9,6 +9,8 @@
 #include "decoded_frames.hpp"
 #include "decode_policy.hpp"
 #include "ffmpeg_utils.hpp"
+#include "timeline.hpp"
+#include "audio_transcode.hpp"
 
 #include <algorithm>
 #include <exception>
@@ -235,9 +237,9 @@ private:
     bool eof_ = false;
 };
 
-class EncodedVideo {
+class ProcessedFrames final : public DecodedFrames {
 public:
-    EncodedVideo(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
+    ProcessedFrames(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
         : input_(input), config_(std::move(config)), cancelled_(cancelled) {
         validate_source(input.info().video_format, config_.filter.bob || config_.filter.ivtc.enabled, config_.filter.colorspace.enabled);
         if (config_.decode == DecodeMode::software) frames_ = std::make_unique<SoftwareFrames>(config_, input, cancelled);
@@ -262,7 +264,6 @@ public:
         const auto dimensions = CMVideoFormatDescriptionGetDimensions(source_format);
         config_.video.width = dimensions.width;
         config_.video.height = dimensions.height;
-        std::optional<CFRef<CMVideoFormatDescriptionRef>> encoder_input_format;
         if (needs_gpu_filter(config_, pixel)) {
             filter_ = std::make_unique<GpuFilter>(make_filter_plan(config_, source_format, pixel));
             if (config_.filter.bob) first_field_ = bob_first_field(config_.filter.field_order, input_.info().video_format, pixel);
@@ -271,22 +272,8 @@ public:
             config_.video.width = static_cast<int>(CVPixelBufferGetWidth(pixel));
             config_.video.height = static_cast<int>(CVPixelBufferGetHeight(pixel));
         }
-        if (filter_ || config_.decode == DecodeMode::software || config_.filter.ivtc.enabled) {
-            CMVideoFormatDescriptionRef raw = nullptr;
-            check_status(CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixel, &raw), "Describe encoder input frame");
-            encoder_input_format.emplace(raw);
-        }
-        create_hardware_session(session_, config_.video, &receive, this, CVPixelBufferGetPixelFormatType(pixel));
-        configure_hardware_encoder(session_.value, config_, encoder_input_format ? encoder_input_format->get() : input_.info().video_format);
-        check_status(VTCompressionSessionPrepareToEncodeFrames(session_.value), "Prepare container video encoder");
-        verify_hardware(session_.value);
-        if (config_.status) config_.status->session(config_, hardware_encoder_id(session_.value), true, CVPixelBufferGetPixelFormatType(pixel));
     }
-    ~EncodedVideo() {
-        // Invalidate before destroying callback state (session_ is otherwise destroyed last).
-        if (session_.value) VTCompressionSessionInvalidate(session_.value);
-    }
-    CMSampleBufferRef next() {
+    std::unique_ptr<Frame> next() override {
         if (!current_ || cancelled_) return nullptr;
         if (field_index_ == 0) {
             following_ = frames_->next();
@@ -319,6 +306,66 @@ public:
             CVPixelBufferGetHeight(pixel) != static_cast<std::size_t>(config_.video.height)) {
             throw std::runtime_error("Decoder changed video dimensions");
         }
+        CFRetain(pixel);
+        auto result = std::make_unique<Frame>(Frame{CFRef(pixel), pts, duration, current_->cadence});
+        filtered_.reset();
+        if (config_.filter.bob && field_index_ == 0) field_index_ = 1;
+        else { current_ = std::move(following_); field_index_ = 0; }
+        return result;
+    }
+    [[nodiscard]] std::int64_t gpu_frames() const { return gpu_frames_; }
+    [[nodiscard]] bool filtered() const { return static_cast<bool>(filter_); }
+private:
+    std::unique_ptr<GpuFilter> filter_;
+    std::optional<CFRef<CVPixelBufferRef>> filtered_;
+    std::int64_t gpu_frames_ = 0;
+    ContainerInput& input_;
+    EncodeConfig config_;
+    std::unique_ptr<DecodedFrames> frames_;
+    const volatile std::sig_atomic_t& cancelled_;
+    std::unique_ptr<Frame> current_, following_;
+    CMTime frame_duration_ = kCMTimeInvalid, previous_interval_ = kCMTimeInvalid;
+    unsigned field_index_ = 0, first_field_ = 0;
+};
+
+class EncodedVideo {
+public:
+    EncodedVideo(ContainerInput& input, EncodeConfig config, const volatile std::sig_atomic_t& cancelled)
+        : config_(std::move(config)), cancelled_(cancelled) {
+        auto processed = std::make_unique<ProcessedFrames>(input, config_, cancelled);
+        processed_ = processed.get();
+        frames_ = std::move(processed);
+        if (config_.sync != SyncMode::vfr)
+            frames_ = std::make_unique<CfrFrames>(std::move(frames_), config_.sync, config_.fps_num, config_.fps_den, cancelled);
+        current_ = frames_->next();
+        if (!current_) { if (!cancelled_) throw std::runtime_error("No processed video frames"); return; }
+        const auto pixel = current_->pixel.get();
+        config_.video.width = static_cast<int>(CVPixelBufferGetWidth(pixel));
+        config_.video.height = static_cast<int>(CVPixelBufferGetHeight(pixel));
+        CMVideoFormatDescriptionRef raw = nullptr;
+        check_status(CMVideoFormatDescriptionCreateForImageBuffer(nullptr, pixel, &raw), "Describe processed encoder input");
+        CFRef format(raw);
+        create_hardware_session(session_, config_.video, &receive, this, CVPixelBufferGetPixelFormatType(pixel));
+        configure_hardware_encoder(session_.value, config_,
+            processed_->filtered() || config_.decode == DecodeMode::software || config_.filter.ivtc.enabled
+                ? format.get() : input.info().video_format);
+        if (config_.dar) {
+            sar_ = display_sar(*config_.dar, config_.video.width, config_.video.height, input.info().transform);
+            set_display_sar(session_.value, *sar_);
+        }
+        check_status(VTCompressionSessionPrepareToEncodeFrames(session_.value), "Prepare container video encoder");
+        verify_hardware(session_.value);
+        if (config_.status) config_.status->session(config_, hardware_encoder_id(session_.value), true, CVPixelBufferGetPixelFormatType(pixel));
+    }
+    ~EncodedVideo() {
+        if (session_.value) VTCompressionSessionInvalidate(session_.value);
+    }
+    CMSampleBufferRef next() {
+        if (advance_) { current_.reset(); current_ = frames_->next(); }
+        advance_ = true;
+        if (!current_ || cancelled_) return nullptr;
+        const auto pixel = current_->pixel.get();
+        const auto pts = current_->pts, duration = current_->duration;
         error_ = nullptr;
         output_.reset();
         VTEncodeInfoFlags flags = 0;
@@ -335,7 +382,7 @@ public:
         if (dimensions.width != config_.video.width || dimensions.height != config_.video.height) {
             throw std::runtime_error("Encoder changed source dimensions");
         }
-        if (filter_) {
+        if (processed_->filtered()) {
             const auto format = CMSampleBufferGetFormatDescription(output_->get());
             if (source_pixel_format(format) != CVPixelBufferGetPixelFormatType(pixel)) {
                 throw std::runtime_error("Encoder changed filtered bit depth or color range");
@@ -352,13 +399,11 @@ public:
                 if (!CFEqual(location, kCMFormatDescriptionChromaLocation_Left)) throw std::runtime_error("Encoder changed filtered chroma location");
             }
         }
-        filtered_.reset();
-        if (config_.filter.bob && field_index_ == 0) field_index_ = 1;
-        else { current_ = std::move(following_); field_index_ = 0; }
+        if (sar_) verify_display_sar(CMSampleBufferGetFormatDescription(output_->get()), *sar_);
         CFRetain(output_->get());
         return output_->get();
     }
-    [[nodiscard]] std::int64_t gpu_frames() const { return gpu_frames_; }
+    [[nodiscard]] std::int64_t gpu_frames() const { return processed_->gpu_frames(); }
     void finish() {
         if (session_.value) {
             check_status(VTCompressionSessionCompleteFrames(session_.value, kCMTimeInvalid), "Drain final transcoded frames");
@@ -378,18 +423,13 @@ private:
         } catch (...) { self.error_ = std::current_exception(); }
     }
     CompressionSession session_;
-    std::unique_ptr<GpuFilter> filter_;
-    std::optional<CFRef<CVPixelBufferRef>> filtered_;
-    std::int64_t gpu_frames_ = 0;
-    ContainerInput& input_;
     EncodeConfig config_;
-    std::unique_ptr<DecodedFrames> frames_;
     const volatile std::sig_atomic_t& cancelled_;
+    std::unique_ptr<DecodedFrames> frames_;
+    ProcessedFrames* processed_ = nullptr; // Owned by frames_ or its CFR decorator.
     std::unique_ptr<Frame> current_;
-    std::unique_ptr<Frame> following_;
-    CMTime frame_duration_ = kCMTimeInvalid;
-    CMTime previous_interval_ = kCMTimeInvalid;
-    unsigned field_index_ = 0, first_field_ = 0;
+    bool advance_ = false;
+    std::optional<std::array<int, 2>> sar_;
     std::optional<CFRef<CMSampleBufferRef>> output_;
     std::exception_ptr error_;
 };
@@ -442,9 +482,18 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
     if (!video) throw std::runtime_error("No encoded video output");
     // After muxing starts, even the buffered header belongs to this attempt.
     // A retry must never append another stream to irreversible stdout output.
+    auto output_info = input.info();
+    std::unique_ptr<AudioTranscoder> audio_encoder;
+    if (config.aac_audio) {
+        audio_encoder = std::make_unique<AudioTranscoder>(input, config, cancelled);
+        output_info.audio_parameters = audio_encoder->parameters();
+        output_info.audio_timebase_num = 1;
+        output_info.audio_timescale = output_info.audio_parameters->sample_rate;
+    }
+    const auto read_audio = [&]() { return audio_encoder ? audio_encoder->next() : input.read_audio(); };
+    auto audio = read_audio();
     stdout_started = config.output == "-";
-    ContainerOutput output(config, input.info(), CMSampleBufferGetFormatDescription(video->get()), cancelled);
-    auto audio = input.read_audio();
+    ContainerOutput output(config, output_info, CMSampleBufferGetFormatDescription(video->get()), cancelled);
     const auto origin = CMSampleBufferGetPresentationTimeStamp(video->get());
     const auto declared_total = input.info().video_range.duration;
     const auto total = CMTIME_IS_NUMERIC(declared_total) && declared_total.value > 0
@@ -454,9 +503,9 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
     std::int64_t audio_count = 0;
     CMTime last_audio = kCMTimeInvalid;
     while ((video || audio) && !cancelled) {
-        if (audio && (!video || CMTimeCompare(media_time(audio->pts, {input.info().audio_timebase_num, input.info().audio_timescale}, "audio PTS"),
+        if (audio && (!video || CMTimeCompare(media_time(audio->pts, {output_info.audio_timebase_num, output_info.audio_timescale}, "audio PTS"),
                                              CMSampleBufferGetPresentationTimeStamp(video->get())) <= 0)) {
-            const auto pts = media_time(audio->pts, {input.info().audio_timebase_num, input.info().audio_timescale}, "audio PTS");
+            const auto pts = media_time(audio->pts, {output_info.audio_timebase_num, output_info.audio_timescale}, "audio PTS");
             require_time(pts, "audio PTS");
             if (CMTIME_IS_NUMERIC(last_audio) && CMTimeCompare(pts, last_audio) <= 0) {
                 throw std::runtime_error("Audio PTS must strictly increase; duplicate source timestamps or overlapping packets (use --no-audio)");
@@ -464,7 +513,7 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
             last_audio = pts;
             output.append_audio(audio.get());
             ++audio_count;
-            audio = input.read_audio();
+            audio = read_audio();
         } else {
             output.append_video(video->get());
             ++video_count;

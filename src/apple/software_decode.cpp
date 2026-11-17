@@ -191,7 +191,8 @@ struct SoftwareFrames::Impl {
             throw std::runtime_error("Software decoded pixel format/range changed mid-stream");
         }
         // RFF lookahead and a pending repeated field may retain extra sources.
-        const int limit = ivtc ? 8 : 3;
+        // CFR retains the current picture and one lookahead after processing.
+        const int limit = ivtc ? 10 : 5;
         CFRef number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &limit));
         const void* keys[] = {kCVPixelBufferPoolAllocationThresholdKey};
         const void* values[] = {number.get()};

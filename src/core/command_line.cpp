@@ -124,6 +124,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         }
         const bool common = arg == "--codec" || arg == "--output-depth";
         if (!common && arg != "--output-format" && arg != "-i" && arg != "-o" && arg != "--input-res" && arg != "--fps" &&
+            arg != "--avsync" && arg != "--dar" && arg != "--audio-codec" && arg != "--audio-bitrate" && arg != "--audio-samplerate" &&
             arg != "--frames" && arg != "--gop-len" && arg != "--bitrate" && arg != "--quality" &&
             arg != "--vpp-colorspace" && arg != "--output-res" && arg != "--crop" && arg != "--output-range" &&
             arg != "--input-matrix" && arg != "--output-matrix" && arg != "--input-chroma-loc" && arg != "--deinterlace" && arg != "--field-order") {
@@ -201,6 +202,30 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             }
             if (arg == "--input-res") { result.probe.width = width; result.probe.height = height; }
             else { result.encode.filter.output_size = {width, height}; result.encode.filter.requested = true; }
+        } else if (arg == "--avsync") {
+            if (value == "vfr") result.encode.sync = SyncMode::vfr;
+            else if (value == "cfr") result.encode.sync = SyncMode::cfr;
+            else if (value == "forcecfr") result.encode.sync = SyncMode::forcecfr;
+            else throw std::invalid_argument("--avsync requires vfr, cfr or forcecfr");
+        } else if (arg == "--dar") {
+            const auto split = value.find(':');
+            if (split == std::string_view::npos) throw std::invalid_argument("--dar requires NUM:DEN");
+            auto n = positive_integer(value.substr(0, split), arg);
+            auto d = positive_integer(value.substr(split + 1), arg);
+            const auto gcd = std::gcd(n, d);
+            result.encode.dar = {n / gcd, d / gcd};
+        } else if (arg == "--audio-codec") {
+            if (value != "aac") throw std::invalid_argument("--audio-codec supports only aac (AudioToolbox AAC-LC)");
+            result.encode.aac_audio = true;
+            result.encode.copy_audio = false;
+        } else if (arg == "--audio-bitrate") {
+            const auto kbps = positive_integer(value, arg);
+            if (kbps > 2147483) throw std::invalid_argument("--audio-bitrate exceeds 2147483 kbit/s");
+            result.encode.audio_bitrate = kbps * 1000;
+        } else if (arg == "--audio-samplerate") {
+            const auto rate = positive_integer(value, arg);
+            if (rate != 44100 && rate != 48000) throw std::invalid_argument("--audio-samplerate requires 44100 or 48000 Hz");
+            result.encode.audio_sample_rate = rate;
         } else if (arg == "--fps") {
             const auto split = value.find('/');
             result.encode.fps_num = positive_integer(value.substr(0, split), arg);
@@ -239,6 +264,11 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
     if (seen.contains("--field-order") && !result.encode.filter.bob && !result.encode.filter.ivtc.enabled) {
         throw std::invalid_argument("--field-order requires --deinterlace bob or --vpp-ivtc");
     }
+    if (static_cast<int>(seen.contains("--audio-copy")) + static_cast<int>(seen.contains("--no-audio")) +
+        static_cast<int>(seen.contains("--audio-codec")) > 1)
+        throw std::invalid_argument("--audio-copy, --no-audio and --audio-codec are mutually exclusive");
+    if ((seen.contains("--audio-bitrate") || seen.contains("--audio-samplerate")) && !result.encode.aac_audio)
+        throw std::invalid_argument("--audio-bitrate/--audio-samplerate require --audio-codec aac");
     if (encode_options) {
         if (has_command) throw std::invalid_argument("Encoding options cannot be combined with a query command");
         result.command = Command::encode;
@@ -255,13 +285,16 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         // --input-res explicitly selects the existing tightly packed raw path.
         if (!synthetic && !seen.contains("--input-res")) {
             result.command = Command::transcode;
-            if (seen.contains("--frames") || seen.contains("--fps")) {
-                throw std::invalid_argument("Container transcoding reads source dimensions/timing; --input-res, --frames and --fps are raw-only");
-            }
+            if (seen.contains("--frames")) throw std::invalid_argument("--frames is raw-only");
+            if (result.encode.sync != SyncMode::vfr && !seen.contains("--fps"))
+                throw std::invalid_argument("--avsync cfr/forcecfr requires explicit --fps NUM[/DEN]");
+            if (result.encode.sync == SyncMode::vfr && seen.contains("--fps"))
+                throw std::invalid_argument("Container --fps requires --avsync cfr or forcecfr; otherwise it is raw-only");
             if (seen.contains("--audio-copy") && seen.contains("--no-audio")) {
                 throw std::invalid_argument("--audio-copy and --no-audio are mutually exclusive");
             }
         } else {
+            if (seen.contains("--avsync")) throw std::invalid_argument("--avsync requires compressed input; raw input already has a fixed rate");
             if (seen.contains("--avhw") || seen.contains("--avsw")) {
                 throw std::invalid_argument("--avhw and --avsw require compressed input (without --input-res)");
             }
@@ -278,7 +311,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
                 if (result.probe.height % 4) throw std::invalid_argument("Raw Bob requires height divisible by four for interlaced 4:2:0");
             }
             if (!seen.contains("--frames")) throw std::invalid_argument("Encoding requires --frames COUNT");
-            if (seen.contains("--audio-copy") || seen.contains("--no-audio")) {
+            if (seen.contains("--audio-copy") || seen.contains("--no-audio") || result.encode.aac_audio) {
                 throw std::invalid_argument("Audio options require compressed input");
             }
         }
@@ -307,7 +340,9 @@ Usage:
   vtenc --check-features [--codec h264|hevc] [--output-depth 8|10]
   vtenc -i input-file -o output-file [-f FORMAT | --output-format FORMAT]
         [--avhw | --avsw]
-        [--codec h264|hevc] [--output-depth 8|10] [--audio-copy | --no-audio]
+        [--codec h264|hevc] [--output-depth 8|10] [--audio-copy | --no-audio | --audio-codec aac]
+        [--audio-bitrate KBIT/S] [--audio-samplerate 44100|48000]
+        [--avsync vfr|cfr|forcecfr] [--fps NUM[/DEN]] [--dar NUM:DEN]
         [--crop LEFT,TOP,RIGHT,BOTTOM] [--output-res WIDTHxHEIGHT]
         [--output-range limited|full] [--output-matrix bt601|bt709|bt2020nc|smpte240m]
         [--input-matrix bt601|bt709|bt2020nc|smpte240m] [--input-chroma-loc left|center|top-left]
@@ -316,7 +351,7 @@ Usage:
         [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
   vtenc (--synthetic | -i raw-file) -o output-file --input-res WIDTHxHEIGHT
         --frames COUNT [-f FORMAT | --output-format FORMAT] [--codec h264|hevc] [--output-depth 8|10]
-        [--fps NUM[/DEN]] [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
+        [--fps NUM[/DEN]] [--dar NUM:DEN] [--bitrate KBIT/S | --quality 0..1] [--gop-len COUNT]
 
 --json-status: versioned JSON Lines on stderr, including diagnostics and terminal
 events; without it, live progress and all encoding logs also use stderr. Unknown
@@ -346,6 +381,17 @@ bytes already written cannot be retracted.
 Feature probing creates a hardware-only 1920x1080 VideoToolbox session.
 Listed properties are not validated value combinations; the probe encodes no frames.
 Compressed input: avformat probes any format; hardware-only encode.
+--avsync defaults to vfr. cfr/forcecfr require --fps; sample-and-hold on a grid
+anchored at the first filtered video PTS, after Bob/IVTC. cfr clips the last
+period to the source end; forcecfr extends it to a full period. Gaps hold the
+previous picture; duplicate/backward PTS fail. Audio timestamps stay unchanged.
+--dar sets display aspect after rotation, deriving SAR from final stored size;
+only orthogonal unit rotation/reflection is accepted with a DAR override.
+--audio-codec aac uses AudioToolbox AAC-LC, libavcodec audio decode and
+libswresample; mono/stereo only, no downmix, source rate or explicit 44100/48000.
+Default AAC bitrate is 192 kbit/s ABR; unsupported settings and missing audio fail.
+AAC requires file output with verifiable priming/padding; stdout supports copy/none.
+Movie AAC input requires a locally readable native packet table for exact trims.
 First audio track copied by default; the selected output must accept its codec.
 --input-res selects tightly packed raw input instead of avformat.
 --avhw: avformat demuxing, require hardware decoding; any hardware decode failure is fatal.

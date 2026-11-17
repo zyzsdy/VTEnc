@@ -74,3 +74,23 @@ zimg is distributed under the following license (upstream `COPYING`):
   0. You just DO WHAT THE FUCK YOU WANT TO.
 
 ```
+
+## FFmpeg audio decoding and resampling
+
+VTEnc links externally supplied libavformat, libavcodec, libavutil and
+libswresample. The P5 audio module uses libavcodec only for audio decoding and
+libswresample for floating-point PCM conversion/resampling. AAC encoding calls
+Apple's system AudioToolbox C API directly; no qaac or FFmpeg encoder source is
+copied into VTEnc, and no FFmpeg video encoder API is used.
+
+Upstream FFmpeg is primarily LGPL-2.1-or-later, with optional components and build
+flags changing the effective license. The local verification build is Homebrew
+FFmpeg 9.0.2 with `--enable-gpl --enable-version3`; it must not be described or
+redistributed as LGPL-only. Distributors must audit the actual linked libraries,
+retain applicable notices, and supply the corresponding sources/build details as
+required by that build's license. See https://ffmpeg.org/legal.html .
+
+The AAC edit-list adapter is an original implementation of public QuickTime /
+ISO movie structures; it does not copy FFmpeg or qaac implementations. Apple's
+AudioToolbox is supplied by macOS, not bundled from Windows Apple Application
+Support. qaac is not a dependency of this repository.

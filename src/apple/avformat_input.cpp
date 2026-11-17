@@ -1,5 +1,8 @@
 #include "cadence_parser.hpp"
 #include "ffmpeg_utils.hpp"
+extern "C" {
+#include <libavutil/opt.h>
+}
 #include "cf_ref.hpp"
 #include "encoder_session.hpp"
 #include "decode_policy.hpp"
@@ -333,7 +336,7 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
         if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
             if (s.video >= 0) throw std::runtime_error("Input requires exactly one video track");
             s.video = static_cast<int>(i);
-        } else if (p->codec_type == AVMEDIA_TYPE_AUDIO && s.audio < 0 && config.copy_audio) s.audio = static_cast<int>(i);
+        } else if (p->codec_type == AVMEDIA_TYPE_AUDIO && s.audio < 0 && (config.copy_audio || config.aac_audio)) s.audio = static_cast<int>(i);
     }
     if (s.video < 0) throw std::runtime_error("avformat found no video track");
     const auto* stream = s.demux->streams[s.video];
@@ -384,6 +387,7 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
         const auto* audio = s.demux->streams[s.audio];
         if (audio->time_base.num <= 0 || audio->time_base.den <= 0) throw std::runtime_error("Invalid audio time base");
         s.info.audio_parameters = audio->codecpar;
+        s.info.audio_edit_list = s.demux->priv_data && av_opt_find(s.demux->priv_data, "ignore_editlist", nullptr, 0, 0);
         s.info.audio_timescale = audio->time_base.den;
         s.info.audio_timebase_num = audio->time_base.num;
     }

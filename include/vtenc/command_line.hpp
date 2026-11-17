@@ -11,6 +11,7 @@ namespace vtenc {
 
 enum class Command { help, version, check_device, check_features, encode, transcode };
 enum class Codec { h264, hevc };
+enum class SyncMode { vfr, cfr, forcecfr };
 enum class DecodeMode { automatic, hardware, software };
 
 struct ProbeConfig {
@@ -89,6 +90,11 @@ struct EncodeConfig {
     std::int32_t gop = 60;
     std::int32_t bitrate = 5'000'000; // AverageBitRate, bits/s; unused when quality is set.
     std::optional<double> quality;
+    SyncMode sync = SyncMode::vfr;
+    std::optional<std::array<int, 2>> dar; // Display aspect after orthogonal rotation.
+    bool aac_audio = false;
+    int audio_bitrate = 192000;
+    int audio_sample_rate = 0; // Preserve source rate; only 44100/48000 accepted for AAC.
     bool copy_audio = true; // Container jobs copy the first audio track, when present.
 };
 

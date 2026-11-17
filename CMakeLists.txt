@@ -27,7 +27,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Link the installed libraries, never invoke the ffmpeg CLI at runtime.
 # A custom installation can be selected using CMAKE_PREFIX_PATH.
 find_path(VTENC_FFMPEG_INCLUDE_DIR libavcodec/avcodec.h REQUIRED)
-foreach(component avformat avcodec avutil)
+foreach(component avformat avcodec avutil swresample)
     find_library(VTENC_${component}_LIBRARY NAMES ${component} REQUIRED)
 endforeach()
 
@@ -53,6 +53,9 @@ configure_file(src/apple/shaders/filter_shader.hpp.in generated/filter_shader.hp
 add_library(vtenc_apple STATIC
     src/apple/encoder.cpp
     src/apple/transcode.cpp
+    src/apple/timeline.cpp
+    src/apple/audio_transcode.cpp
+    src/apple/aac_edit.cpp
     src/apple/software_decode.cpp
     src/apple/filter_plan.cpp
     src/apple/bob.cpp
@@ -71,8 +74,8 @@ add_library(vtenc_apple STATIC
 target_include_directories(vtenc_apple PUBLIC include PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_include_directories(vtenc_apple SYSTEM PUBLIC "${VTENC_FFMPEG_INCLUDE_DIR}")
 target_link_libraries(vtenc_apple PRIVATE vtenc_options vtenc_core
-    "${VTENC_avformat_LIBRARY}" "${VTENC_avcodec_LIBRARY}" "${VTENC_avutil_LIBRARY}")
-foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox Foundation Metal)
+    "${VTENC_avformat_LIBRARY}" "${VTENC_avcodec_LIBRARY}" "${VTENC_avutil_LIBRARY}" "${VTENC_swresample_LIBRARY}")
+foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox AudioToolbox Foundation Metal)
     find_library(VTENC_${framework}_LIBRARY ${framework} REQUIRED)
     target_link_libraries(vtenc_apple PRIVATE "${VTENC_${framework}_LIBRARY}")
 endforeach()
@@ -124,6 +127,11 @@ if(BUILD_TESTING)
     target_link_libraries(vtenc_hevc_cadence_test PRIVATE vtenc_apple vtenc_options)
     add_test(NAME vtenc.hevc-cadence COMMAND vtenc_hevc_cadence_test)
     set_tests_properties(vtenc.hevc-cadence PROPERTIES LABELS "cadence" TIMEOUT 15)
+    add_executable(vtenc_cfr_test tests/cfr_test.cpp)
+    target_include_directories(vtenc_cfr_test PRIVATE src/apple)
+    target_link_libraries(vtenc_cfr_test PRIVATE vtenc_apple vtenc_options)
+    add_test(NAME vtenc.cfr COMMAND vtenc_cfr_test)
+    set_tests_properties(vtenc.cfr PROPERTIES LABELS "timeline" TIMEOUT 15)
     add_executable(vtenc_timeline_test tests/timeline_test.cpp)
     target_include_directories(vtenc_timeline_test PRIVATE src/apple)
     target_link_libraries(vtenc_timeline_test PRIVATE vtenc_apple vtenc_options)

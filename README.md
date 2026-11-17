@@ -20,6 +20,7 @@
 - Metal Bob 按 TFF/BFF 输出两场对应的逐行帧，精确场倍频；支持原始 NV12/P010、硬解或软解的文件输入。两个原始交错样片在本机无法硬解，可用软解接入 Metal Bob。
 - P4 `--json-status` 版本化 JSON Lines 能力、进度与终态协议，或普通终端实时进度；编码日志统一 stderr，stdout 可独占码流。
 - avformat 自动识别 Y4M 文件/stdin；显式 `--avsw` 接收 planar 4:2:0 8/10-bit，严格校验颜色解释、帧率、截断和 EOF。
+- P5 显式 CFR／forcecfr、旋转后 DAR 标签覆盖，以及原生 AudioToolbox AAC-LC 转码；采样率、声道和封装边界见下文。
 - 有界回调和重排队列、背压和排空；SIGINT 取消、失败清理、输出防覆盖。
 - 不依赖硬件编码器的 CLI / 码流适配检查，以及显式硬件集成验证脚本。
 
@@ -29,7 +30,7 @@ P4 用法、JSON 字段、Y4M 颜色解释及生产者退出状态约定见 [P4 
 
 ## 环境准备
 
-需要原生 arm64 macOS、支持 C++20 的 Apple Clang、macOS SDK、CMake 3.25+、Ninja 和 FFmpeg 7.0+ 开发库（`libavformat`、`libavcodec`、`libavutil`）。最低部署版本暂定 macOS 13；这不代表所有目标功能在 macOS 13 上均可用，新 API 必须检查系统版本与会话能力。
+需要原生 arm64 macOS、支持 C++20 的 Apple Clang、macOS SDK、CMake 3.25+、Ninja 和 FFmpeg 7.0+ 开发库（`libavformat`、`libavcodec`、`libavutil`、`libswresample`）。最低部署版本暂定 macOS 13；这不代表所有目标功能在 macOS 13 上均可用，新 API 必须检查系统版本与会话能力。
 
 ```bash
 xcode-select --install  # 尚未安装 Xcode Command Line Tools 时执行
@@ -129,7 +130,7 @@ ctest --preset dev -R '^vtenc.timeline$'
 python3 tests/transcode_hardware.py --vtenc build/dev/vtenc
 ```
 
-不提供 `--input-res` 的文件输入全部走 avformat：不检查支持格式列表，也不依赖扩展名。MKV、TS、WebM、未知扩展名、无扩展名或错误扩展名均直接尝试解封装；失败保留 FFmpeg 的操作名、错误文本和错误码。输出不限制扩展名或格式列表：省略 `-f` 时由 avformat 根据输出文件名选择封装器；指定 `-f FORMAT` 或 `--output-format FORMAT` 时优先使用该 FFmpeg 封装器名称。无法推断格式、未知封装器或不兼容的流直接报错，不触发软解回退。文件模式读取源尺寸和时间轴，拒绝 `--fps`、`--frames`。`--input-res` 明确选择 P1 紧密排列原始帧模式，此时还需 `--frames`，且不能指定 `--avhw` / `--avsw`。
+不提供 `--input-res` 的文件输入全部走 avformat：不检查支持格式列表，也不依赖扩展名。MKV、TS、WebM、未知扩展名、无扩展名或错误扩展名均直接尝试解封装；失败保留 FFmpeg 的操作名、错误文本和错误码。输出不限制扩展名或格式列表：省略 `-f` 时由 avformat 根据输出文件名选择封装器；指定 `-f FORMAT` 或 `--output-format FORMAT` 时优先使用该 FFmpeg 封装器名称。无法推断格式、未知封装器或不兼容的流直接报错，不触发软解回退。文件模式读取源尺寸和时间轴，拒绝 `--frames`；仅显式 `--avsync cfr|forcecfr` 时接受目标 `--fps`。`--input-res` 明确选择 P1 紧密排列原始帧模式，此时还需 `--frames`，且不能指定 `--avhw` / `--avsw`。
 
 输出示例（编码器始终为 VideoToolbox 硬件编码器）：
 
@@ -197,15 +198,44 @@ python3 tests/avformat_hardware.py --vtenc build/dev/vtenc
 
 FFmpeg 来自外部安装，本仓库没有复制其上游实现。FFmpeg 的基础许可证为 LGPL 2.1-or-later，启用 GPL/version3 等配置会改变该构建的许可证；本机 Homebrew 库启用了 GPL 与 version3。分发时须按实际链接库的许可证提供对应源码、配置及声明，不能将任意 Homebrew 构建视为 LGPL-only。见 [FFmpeg 许可证说明](https://ffmpeg.org/legal.html)。VTEnc 不调用 FFmpeg 的视频编码 API。
 
-音频通过 avformat 读取并复制到所选输出容器，不进行音频重编码；必要时由封装器执行 AAC ADTS → AudioSpecificConfig 位流适配。默认复制第一条音轨，`--no-audio` 禁用。与目标容器不兼容的音频直接报错并提示 `--no-audio`。AVPacket 的 priming / trim 边信息随包传入封装器，能否写入取决于目标格式（例如 TS 不保存 AAC priming / trim）；不同容器的音频首尾解码采样数可能不同。音视频共用输入时间原点，不分别归零。
+默认音频通过 avformat 读取并复制到所选输出容器；显式 `--audio-codec aac` 启用下述 P5 转码。复制模式下，必要时由封装器执行 AAC ADTS → AudioSpecificConfig 位流适配。默认复制第一条音轨，`--no-audio` 禁用。与目标容器不兼容的音频直接报错并提示 `--no-audio`。AVPacket 的 priming / trim 边信息随包传入封装器，能否写入取决于目标格式（例如 TS 不保存 AAC priming / trim）；不同容器的音频首尾解码采样数可能不同。音视频共用输入时间原点，不分别归零。
 
 视频 PTS 使用整数有理数传递，相邻 PTS 决定显示时长。TS 等容器可能没有末帧 duration：此时明确打印诊断并沿用前一个显示间隔；只有一帧且无 duration 时仍报错。音视频的输入时钟未必能精确映射到封装器选定的输出时钟（例如 MKV 常用 1/1000，TS 使用 1/90000）；写入时采用整数有理数就近舍入，误差不超过半个输出刻度，并首次打印换算诊断。可精确表示时不舍入；输出时钟若把不同视频帧的 PTS 或有效时长压成同一刻度，直接报错。封装器最终可保存的时长、旋转与边信息取决于格式；裸码流没有容器级时间戳。源音频 PTS 不递增、损坏包、流参数变化或目标封装失败均直接退出。
 
-当前限定一个视频轨；HDR 输入必须显式指定 `--vpp-colorspace`，交错输入必须显式启用 Bob。支持位深、尺寸和色彩空间转换；不支持 Dolby Vision、音频转码、多音轨选择、字幕、章节与附件。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
+当前限定一个视频轨；HDR 输入必须显式指定 `--vpp-colorspace`，交错输入必须显式启用 Bob。支持位深、尺寸和色彩空间转换；不支持 Dolby Vision、多音轨选择、字幕、章节与附件。显示旋转作为容器变换交给输出封装器（目标格式必须能保存该元数据）；输入编辑列表和丢弃标记按 avformat 语义处理，不再经过 AVFoundation 的单段编辑列表校验。
 
 本地文件任务取消或运行错误不发布成品，临时目录自动清理；成功写完 trailer、检查写入错误并关闭文件后，以不覆盖既有文件的方式发布。强制杀进程或系统崩溃可能残留 `.part.*` 临时目录。
 
 已使用 `video_samples` 的全部 13 个原始样片实施正向转码或明确拒绝检查，另以无重编码派生 MOV 验证输入容器和旋转。9 个成功转码用例的码流和时间轴均通过独立检查，VFR 音轨逐包哈希、PTS 和解码 PCM 完全一致。详见 [P2 验证记录](docs/P2验证.md)。
+
+## P5 时间轴、DAR 与 AAC
+
+```bash
+# 默认 VFR；CFR 模式必须显式给出目标有理数帧率
+./build/dev/vtenc -i input.mp4 -o build/cfr.mp4 --avsync cfr --fps 30000/1001
+./build/dev/vtenc -i input.mp4 -o build/constant.mp4 --avsync forcecfr --fps 24000/1001
+
+# 最终显示比例；只改 SAR 标签，不添加缩放
+./build/dev/vtenc -i input.mp4 -o build/aspect.mp4 --dar 16:9
+
+# 第一条音轨转为 Apple AAC-LC，显式重采样为 48 kHz
+./build/dev/vtenc -i input.mov -o build/aac.mp4 --audio-codec aac \
+  --audio-bitrate 192 --audio-samplerate 48000
+```
+
+`--avsync vfr` 是默认值，保留源显示 PTS。`cfr` 与 `forcecfr` 在 Bob／IVTC、几何与色彩处理之后重采样，网格为 `第一帧 PTS + n × fps_den/fps_num`；采用当前时刻最近的已开始画面，间隔内没有新画面就重复，已经跨过的画面丢弃，不做运动插帧。前向跳跃保持上一画面；重复、倒退或无法精确表示的时间戳报错，不移动音轨。`cfr` 截短最后不足一周期的输出，保持视频尾点；`forcecfr` 保持每帧完整周期，尾点最多延长不足一周期。终端进度统计输出帧数，复制／AAC 的音频不随视频变速或补静音。原始帧已经由 `--fps` 定时，不接受 `--avsync`。
+
+`--dar NUM:DEN` 表示**显示旋转之后**的宽高比。未旋转或旋转 180° 时，`SAR = DAR × 最终高度/最终宽度`；90°／270° 时先取 DAR 倒数。先裁剪、再缩放，按最终存储尺寸计算并约分，视频像素不因 DAR 覆盖而改变；镜像可以保留，带缩放、错切或任意角度的显示矩阵不能和 DAR 覆盖组合。SAR 分子、分母必须能装入 H.264／HEVC 的 16-bit 扩展 SAR 字段；每个实际编码格式描述会核对请求值。无覆盖时维持既有 SAR 传递行为。旋转仍是容器元数据；裸码流只有 SAR，不能表达完整的旋转后显示语义。
+
+`--audio-copy`（默认）、`--no-audio`、`--audio-codec aac` 三选一。AAC 只处理第一条音轨，缺音轨直接报错；使用 `libavcodec` 音频解码、`libswresample` 浮点重采样和 AudioToolbox C API 编码，不调用 FFmpeg／qaac 子进程，也不调用 FFmpeg 视频编码器。AAC-LC、ABR，默认 192 kbit/s，`--audio-bitrate` 单位为 kbit/s；编码器质量设为 Apple High，所有属性检查返回值并读回，不支持的码率不自动调整。当前保留 mono／stereo 声道布局，不隐式混音；输出采样率保留源值或用 `--audio-samplerate 44100|48000` 指定，其他输出采样率明确拒绝。重采样起点就近对齐到输出采样时钟，最多半个采样误差并输出诊断，后续按整数样本计数，不累计舍入误差。音频时间戳断裂或中途格式变化报错。
+
+AAC 处理解码器、重采样器和编码器的排空，实际查询 priming，记录尾部 padding。MOV／MP4 使用完整 AAC 包时长及精确编辑列表区分媒体样本与有效播放区间，保留原 A/V 起点；尾部 moov 限制为 64 MiB，MOV 的有效音频起点须非负。发布前由 Apple AudioFile API 回读有效采样表；其他封装器使用 avformat 回读包数、时间戳和 skip/discard 信息，丢失裁剪信息则失败，不发布成品。已验证 MP4、MOV、MKV；TS 和裸流不能保留本模式要求的首尾裁剪，会报错。输出依然由 avformat 选择，没有格式白名单。
+
+AAC 转码当前要求文件输出；stdout 继续支持音频复制／关闭。MOV 家族的 AAC 输入额外通过 AudioFile 读取第一音轨的有效采样数，修正当前 FFmpeg 对带起始空编辑的尾部裁剪解释；媒体包仍全部由 avformat 解封装、libavcodec 解码。这类输入需要可被系统元数据解析器读取的本地文件；stdin／URL 或系统解析器不支持的文件明确报错。当前 FFmpeg 对带正起点或极短有效区间的 MOV／MP4 AAC 解码，可能仍输出不符合编辑区间的尾部采样；请用遵守该区间的解码器，或明确按编辑区间裁剪。测试用 Apple `afconvert` 独立解码并比对有效采样数与首尾 PCM，不将“可播放”视为同步通过。
+
+qaac 自 v3.00 起支持原生 macOS 构建，可继续由 NegativeEncoder 作为外部音频 CLI 使用；VTEnc 内部直接调用同一 Apple 编码器体系的 AudioToolbox，不嵌入 qaac。两者的默认码控、预处理和首尾处理可能不同，不承诺结果逐字节相同。依据：[qaac 发布说明](https://github.com/nu774/qaac/releases/tag/v3.00)、[Apple AAC 延迟与编辑结构](https://developer.apple.com/documentation/quicktime-file-format/using_track_structures_to_represent_encode_delay_explictly)。
+
+本机验证范围、命令与结果见 [P5 验证](docs/P5验证.md)。
 
 ## P3 GPU 缩放、裁剪与基础色彩转换
 

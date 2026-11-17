@@ -5,6 +5,7 @@
 #include "gpu_filter.hpp"
 #include "bob.hpp"
 #include "ffmpeg_utils.hpp"
+#include "timeline.hpp"
 
 #include <array>
 #include <atomic>
@@ -37,6 +38,8 @@ public:
         }
     }
     void append(CMSampleBufferRef sample) {
+        if (config_.dar) verify_display_sar(CMSampleBufferGetFormatDescription(sample),
+            display_sar(*config_.dar, config_.video.width, config_.video.height, {1, 0, 0, 1, 0, 0}));
         if (elementary_) { elementary_->append(sample); ++frames_; report(sample); return; }
         if (CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(sample), CMTimeMake(frames_ * config_.fps_den, config_.fps_num)) != 0 ||
             CMTimeCompare(CMSampleBufferGetDuration(sample), CMTimeMake(config_.fps_den, config_.fps_num)) != 0) {

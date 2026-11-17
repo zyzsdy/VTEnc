@@ -3,6 +3,7 @@
 #include "vtenc/command_line.hpp"
 #include "vtenc/error.hpp"
 #include "cf_ref.hpp"
+#include "timeline.hpp"
 
 #include <VideoToolbox/VideoToolbox.h>
 #include <cstdint>
@@ -99,7 +100,7 @@ inline void configure_hardware_encoder(VTCompressionSessionRef session, const En
     set(kVTCompressionPropertyKey_RealTime, kCFBooleanFalse, "RealTime");
     set_integer(kVTCompressionPropertyKey_MaxKeyFrameInterval, config.gop, "MaxKeyFrameInterval");
     if (config.filter.bob) set_integer(kVTCompressionPropertyKey_FieldCount, 1, "FieldCount [Bob progressive output]");
-    if (!source_format) {
+    if (!source_format || config.sync != SyncMode::vfr) {
         // Floating point is only an encoder rate hint. All submitted times use CMTime integers.
         const double fps = static_cast<double>(config.fps_num) / config.fps_den;
         CFRef rate(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &fps));
@@ -127,6 +128,8 @@ inline void configure_hardware_encoder(VTCompressionSessionRef session, const En
             }
         }
     }
+    if (!source_format && config.dar) set_display_sar(session, display_sar(*config.dar,
+        config.video.width, config.video.height, {1, 0, 0, 1, 0, 0}));
 }
 
 } // namespace vtenc

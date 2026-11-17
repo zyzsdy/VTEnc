@@ -140,7 +140,7 @@ int main(int argc, char* argv[]) {
                 log << "Input demuxer: FFmpeg libavformat\n";
                 log << (result.decoder == vtenc::DecodeMode::hardware
                     ? "Hardware decoder verified: yes\n" : "Software decoder: FFmpeg libavcodec (libavformat demux)\n")
-                    << "Audio samples copied (first track): " << result.audio_samples << '\n';
+                    << (options.encode.aac_audio ? "AAC packets encoded (first track): " : "Audio packets copied (first track): ") << result.audio_samples << '\n';
             } else if (result.timestamps_csv) log << "Timestamps: " << options.encode.output << ".timestamps.csv\n";
             log << "Metal GPU frames completed: " << result.gpu_frames << '\n';
             reporter.finish(result);
