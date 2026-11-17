@@ -90,7 +90,7 @@ python3 scripts/package-release.py
 
 `build/packages/` 生成：
 
-- `vtenc-<版本>-macos-arm64.zip`：`bin/vtenc`、`lib/` 动态库、文档、许可证与 `BUILD-MANIFEST.json`。
+- `vtenc-<版本>-macos-arm64.zip`：`bin/vtenc`、`lib/` 动态库、README、许可证与 `BUILD-MANIFEST.json`，不包含仓库的 `docs/` 目录；包内 README 的相关链接指向 GitHub。
 - `vtenc-<版本>-dependency-sources.tar.gz`：该版本对应的未修改依赖源码、构建脚本和命令记录。
 - `vtenc-<版本>-SHA256SUMS.txt`：下载校验值。
 

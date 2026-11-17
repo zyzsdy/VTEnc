@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / 'build/distribution'
@@ -140,7 +141,13 @@ def main():
                 'dependencies': json.loads((ROOT / 'scripts/dependencies.json').read_text())}
     for file in ('README.md', 'THIRD_PARTY_NOTICES.md'):
         shutil.copy2(ROOT / file, docs / file)
-    shutil.copytree(ROOT / 'docs', docs / 'docs')
+    # Keep the repository's development documents online, not in the binary ZIP.
+    readme = docs / 'README.md'
+    readme.write_text(re.sub(
+        r'\]\((docs/[^)]+)\)',
+        lambda match: '](' + 'https://github.com/zyzsdy/VTEnc/blob/' +
+        manifest['source_revision'] + '/' + quote(match.group(1), safe='/') + ')',
+        readme.read_text()))
     licenses = docs / 'licenses'; licenses.mkdir()
     license_files = {
         'ffmpeg': ['COPYING.LGPLv2.1', 'LICENSE.md'],
@@ -151,7 +158,7 @@ def main():
     for item in manifest['dependencies']:
         name_ = item['name']; src = WORK / 'src' / f"{name_}-{item['version']}"
         for file in license_files[name_]:
-            target = licenses / name_ / file
+            target = licenses / name_ / Path(file).name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src / file, target)
     recipes = docs / 'build-recipes'; recipes.mkdir()
@@ -160,7 +167,7 @@ def main():
     (stage / 'BUILD-MANIFEST.json').write_text(json.dumps(manifest, indent=2) + '\n')
     (stage / 'README.txt').write_text(
         f'VTEnc {version} / macOS arm64\n'
-        f'Mach-O deployment floor: macOS {minimum}; see share/doc/vtenc/docs/P9验证.md for tested systems.\n'
+        f'Mach-O deployment floor: macOS {minimum}; see the online P9 verification linked in README.md.\n'
         'Run bin/vtenc; retain the sibling lib directory. Homebrew is not needed at runtime.\n'
         f'Signing: {manifest["signing"]}. '
         + ('Not notarized; Gatekeeper may block downloaded files.\n' if not args.notary_profile else
