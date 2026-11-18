@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.25)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Target architecture")
 project(VTEnc VERSION 0.1.0 LANGUAGES CXX OBJCXX)
-set(VTENC_VERSION_SUFFIX "-alpha.1" CACHE STRING "Release version suffix")
+set(VTENC_VERSION_SUFFIX "-beta.1" CACHE STRING "Release version suffix")
 
 if(NOT APPLE OR NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     message(FATAL_ERROR "VTEnc requires macOS and the Apple SDK.")
