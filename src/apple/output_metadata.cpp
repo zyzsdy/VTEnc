@@ -80,8 +80,21 @@ void export_hdr_metadata(AVCodecParameters* p,CMFormatDescriptionRef format) {
         }
     }
 }
+void fill_missing_color_tags(CFMutableDictionaryRef metadata) {
+    // AddValue leaves an existing source tag intact.
+    CFDictionaryAddValue(metadata, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+    CFDictionaryAddValue(metadata, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2);
+    CFDictionaryAddValue(metadata, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2);
+}
 CFRef<CMVideoFormatDescriptionRef> output_format(const EncodeConfig& c,CMFormatDescriptionRef processed,CMFormatDescriptionRef original,CVPixelBufferRef pixel) {
     auto d=CFRef(CFDictionaryCreateMutableCopy(nullptr,0,CMFormatDescriptionGetExtensions(processed)));
+    for (auto key : {kCVImageBufferYCbCrMatrixKey, kCVImageBufferTransferFunctionKey, kCVImageBufferColorPrimariesKey}) {
+        if (auto raw = CVBufferCopyAttachment(pixel, key, nullptr)) {
+            CFRef attachment(raw);
+            CFDictionarySetValue(d.get(), key, attachment.get());
+        }
+    }
+    fill_missing_color_tags(d.get());
     const auto set=[&](CFStringRef key,CFStringRef value) { if (!value) throw std::runtime_error("CoreVideo cannot represent output color tag"); CFDictionarySetValue(d.get(),key,value); };
     if (c.color_tags.matrix!=ColorMatrix::automatic) set(kCVImageBufferYCbCrMatrixKey,CVYCbCrMatrixGetStringForIntegerCodePoint(static_cast<int>(c.color_tags.matrix)));
     if (c.color_tags.transfer!=ColorTransfer::automatic) set(kCVImageBufferTransferFunctionKey,CVTransferFunctionGetStringForIntegerCodePoint(static_cast<int>(c.color_tags.transfer)));

@@ -99,6 +99,7 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
                           kCVImageBufferYCbCrMatrixKey, kCVImageBufferPixelAspectRatioKey}) {
         if (auto value = metadata(format, source_attachments.get(), key)) CFDictionarySetValue(attachments.get(), key, value);
     }
+    fill_missing_color_tags(attachments.get());
     // Keep original HDR evidence separately, never attach stale HDR labels to
     // transformed pixels. The scheduler decides which evidence is applicable.
     for (const auto pair : {std::pair{kCMFormatDescriptionExtension_MasteringDisplayColorVolume,source_master_key()},
@@ -107,7 +108,7 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
         if (!value) value=metadata(format,source_attachments.get(),pair.first);
         if (value) CFDictionarySetValue(attachments.get(),pair.second,value);
     }
-    const auto transfer = metadata(format, source_attachments.get(), kCVImageBufferTransferFunctionKey);
+    const auto transfer = CFDictionaryGetValue(attachments.get(), kCVImageBufferTransferFunctionKey);
     if (!config.filter.colorspace.enabled && transfer && (CFEqual(transfer, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ) ||
                      CFEqual(transfer, kCVImageBufferTransferFunction_ITU_R_2100_HLG))) {
         throw std::runtime_error("HDR filtering requires explicit --vpp-colorspace conversion");
@@ -116,7 +117,7 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
     const bool tone = color.tonemap.mode != ToneMap::none;
     validate_tonemap(color.tonemap);
     auto input_matrix = config.filter.input_matrix;
-    if (input_matrix == ColorMatrix::automatic) input_matrix = matrix_value(metadata(format, source_attachments.get(), kCVImageBufferYCbCrMatrixKey));
+    if (input_matrix == ColorMatrix::automatic) input_matrix = matrix_value(CFDictionaryGetValue(attachments.get(), kCVImageBufferYCbCrMatrixKey));
     auto output_matrix = config.filter.output_matrix;
     if (output_matrix == ColorMatrix::automatic) output_matrix = tone ? ColorMatrix::bt709 : input_matrix;
     if (output_matrix != ColorMatrix::automatic && input_matrix == ColorMatrix::automatic) {
@@ -128,7 +129,7 @@ FilterPlan make_filter_plan(const EncodeConfig& config, CMFormatDescriptionRef f
     const auto out_transfer = color.output_transfer == ColorTransfer::automatic ? (tone ? ColorTransfer::bt709 : in_transfer) : color.output_transfer;
     auto in_primaries = color.input_primaries;
     if (in_primaries == ColorPrimaries::automatic)
-        in_primaries = primaries_value(metadata(format, source_attachments.get(), kCVImageBufferColorPrimariesKey));
+        in_primaries = primaries_value(CFDictionaryGetValue(attachments.get(), kCVImageBufferColorPrimariesKey));
     const auto out_primaries = color.output_primaries == ColorPrimaries::automatic ? (tone ? ColorPrimaries::bt709 : in_primaries) : color.output_primaries;
     const bool linear = tone || in_transfer != out_transfer || in_primaries != out_primaries;
     if (tone && color.scene_ref) throw std::runtime_error("hdr2sdr requires scene_ref=false (display luminance)");

@@ -182,7 +182,8 @@ struct SoftwareFrames::Impl {
             const auto name = av_get_pix_fmt_name(format);
             throw std::runtime_error("Software decode requires 8/10-bit 4:2:0; got " + std::string(name ? name : "unknown"));
         }
-        const bool full = frame->color_range == AVCOL_RANGE_JPEG || format == AV_PIX_FMT_YUVJ420P;
+        const auto range = frame->color_range == AVCOL_RANGE_UNSPECIFIED ? input.video_parameters()->color_range : frame->color_range;
+        const bool full = range == AVCOL_RANGE_JPEG || format == AV_PIX_FMT_YUVJ420P;
         const OSType type = ten
             ? (full ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange)
             : (full ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);

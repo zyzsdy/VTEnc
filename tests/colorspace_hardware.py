@@ -72,11 +72,11 @@ def main():
                  "matrix=auto:bt709,transfer=auto:bt709,colorprim=auto:bt709,range=auto:limited", sdr_tags)
         case("hlg-to-pq", hlg, "--avsw",
              "matrix=auto:bt2020nc,transfer=auto:smpte2084,colorprim=auto:bt2020,range=auto:limited", pq_tags)
-        # This sample lacks color tags; explicitly declare BT.709 rather than guess.
+        # Exercise missing source tags with each decoder.
         case("sdr-to-pq", sdr, "--avhw",
-             "matrix=bt709:bt2020nc,transfer=bt709:smpte2084,colorprim=bt709:bt2020,range=auto:limited", pq_tags)
+             "matrix=auto:bt2020nc,transfer=auto:smpte2084,colorprim=auto:bt2020,range=auto:limited", pq_tags)
         case("sdr-to-hlg", sdr, "--avsw",
-             "matrix=bt709:bt2020nc,transfer=bt709:arib-std-b67,colorprim=bt709:bt2020,range=auto:limited",
+             "matrix=auto:bt2020nc,transfer=auto:arib-std-b67,colorprim=auto:bt2020,range=auto:limited",
              dict(pq_tags, color_transfer="arib-std-b67"))
         case("sdr-to-p3", sdr, "--avsw",
              "matrix=bt709:bt709,transfer=bt709:bt709,colorprim=bt709:display-p3,range=auto:full",

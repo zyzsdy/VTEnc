@@ -92,11 +92,23 @@ int main() try {
     config.video.bit_depth = 10;
     config.filter.input_chroma = ChromaLocation::left;
     parse_colorspace("transfer=auto:bt709,colorprim=auto:bt709,matrix=auto:bt709",config.filter);
-    rejects([&] { (void)make_filter_plan(config,format().get(),pixel.get()); }, "matrix");
+    const auto defaults = make_filter_plan(config,format().get(),pixel.get());
+    require(!defaults.parameters.convert_matrix && !defaults.parameters.convert_transfer &&
+            defaults.parameters.input_transfer == static_cast<unsigned>(ColorTransfer::bt709) &&
+            defaults.parameters.input_y_offset == 64, "Untagged P010 must resolve to BT.709 limited");
     attach(kCVImageBufferYCbCrMatrixKey,kCVImageBufferYCbCrMatrix_ITU_R_2020);
-    rejects([&] { (void)make_filter_plan(config,format().get(),pixel.get()); }, "transfer");
+    const auto track = format();
+    CVBufferRemoveAttachment(pixel.get(), kCVImageBufferYCbCrMatrixKey);
+    const auto partial = make_filter_plan(config,track.get(),pixel.get());
+    require(partial.parameters.convert_matrix && !partial.parameters.convert_transfer &&
+            partial.parameters.input_kr == matrix_coefficients(ColorMatrix::bt2020nc)[0],
+            "Missing transfer/primaries must preserve the detected matrix");
+    attach(kCVImageBufferYCbCrMatrixKey,kCVImageBufferYCbCrMatrix_ITU_R_601_4);
+    const auto from_frame = make_filter_plan(config,track.get(),pixel.get());
+    require(from_frame.parameters.input_kr == matrix_coefficients(ColorMatrix::bt601)[0],
+            "Frame matrix must override the track matrix");
+    attach(kCVImageBufferYCbCrMatrixKey,kCVImageBufferYCbCrMatrix_ITU_R_2020);
     attach(kCVImageBufferTransferFunctionKey,kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ);
-    rejects([&] { (void)make_filter_plan(config,format().get(),pixel.get()); }, "primaries");
     attach(kCVImageBufferColorPrimariesKey,kCVImageBufferColorPrimaries_ITU_R_2020);
     // Old HDR mastering/content-light data must not describe transformed pixels.
     const std::uint8_t bytes[] = {1,2,3};

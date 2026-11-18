@@ -240,6 +240,7 @@ struct ContainerInput::Impl {
             const void* keys[] = {CFSTR("av1C")}; const void* values[] = {data.get()};
             CFRef atoms(CFDictionaryCreate(nullptr, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
             CFDictionarySetValue(extensions.get(), kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms, atoms.get());
+            fill_missing_color_tags(extensions.get());
             check_status(CMVideoFormatDescriptionCreate(nullptr, kCMVideoCodecType_AV1, p->width, p->height, extensions.get(), &raw), "Describe AV1 hardware input");
         } else if (p->codec_id == AV_CODEC_ID_H264 || p->codec_id == AV_CODEC_ID_HEVC) {
             std::vector<Bytes> sets;
@@ -296,6 +297,8 @@ struct ContainerInput::Impl {
             CFDictionaryApplyFunction(extensions.get(), [](const void* key, const void* value, void* context) {
                 CFDictionarySetValue(static_cast<CFMutableDictionaryRef>(context), key, value);
             }, merged.get());
+            // Supply missing tags before VideoToolbox can infer them from raster size.
+            fill_missing_color_tags(merged.get());
             const auto dimensions = CMVideoFormatDescriptionGetDimensions(parsed.get());
             check_status(CMVideoFormatDescriptionCreate(nullptr, CMFormatDescriptionGetMediaSubType(parsed.get()),
                 dimensions.width, dimensions.height, merged.get(), &raw), "Merge hardware video metadata");
@@ -375,13 +378,7 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
         }
         s.y4m_frame_size = av_image_get_buffer_size(static_cast<AVPixelFormat>(p->format), p->width, p->height, 1);
         av_check(s.y4m_frame_size, "Y4M frame size");
-        const auto& f = config.filter;
-        if ((p->color_space == AVCOL_SPC_UNSPECIFIED && f.input_matrix == ColorMatrix::automatic) ||
-            (p->color_trc == AVCOL_TRC_UNSPECIFIED && f.colorspace.input_transfer == ColorTransfer::automatic) ||
-            (p->color_primaries == AVCOL_PRI_UNSPECIFIED && f.colorspace.input_primaries == ColorPrimaries::automatic) ||
-            (p->color_range == AVCOL_RANGE_UNSPECIFIED && f.input_range == ColorRange::automatic))
-            throw std::runtime_error("Y4M missing color interpretation; specify --vpp-colorspace matrix=FROM:auto,transfer=FROM:auto,colorprim=FROM:auto,range=FROM:auto");
-        if (p->chroma_location == AVCHROMA_LOC_UNSPECIFIED && f.input_chroma == ChromaLocation::automatic)
+        if (p->chroma_location == AVCHROMA_LOC_UNSPECIFIED && config.filter.input_chroma == ChromaLocation::automatic)
             throw std::runtime_error("Y4M missing chroma location; specify --input-chroma-loc left|center|top-left");
     }
     s.require_cadence = config.filter.ivtc.enabled || config.filter.yadif.enabled;

@@ -61,7 +61,7 @@ def main():
         records.append({'case': name, 'exit_code': code, 'final': parsed[-1]})
         return result, parsed
 
-    def verify(path, count, depth, origin=Fraction(0), step=Fraction(1001, 30000)):
+    def verify(path, count, depth, origin=Fraction(0), step=Fraction(1001, 30000), color=None):
         probe = subprocess.run(['ffprobe', '-v', 'error', '-show_streams', '-show_frames', '-select_streams', 'v:0',
                                 '-of', 'json', str(path)], capture_output=True, check=True, timeout=30)
         obj = json.loads(probe.stdout)
@@ -69,8 +69,12 @@ def main():
         frames = obj['frames']
         base = Fraction(stream['time_base'])
         require(len(frames) == count, f'Wrong decoded frame count: {len(frames)} != {count}')
-        require(stream['pix_fmt'] == ('yuv420p10le' if depth == 10 else 'yuv420p'), 'Wrong bit depth/chroma')
+        formats = ('yuv420p10le',) if depth == 10 else ('yuv420p', 'yuvj420p')
+        require(stream['pix_fmt'] in formats, 'Wrong bit depth/chroma')
         for i, frame in enumerate(frames):
+            if color:
+                for key, expected in color.items():
+                    require(frame.get(key) == expected, f'{path.name}: {key}={frame.get(key)}, expected {expected}')
             require(abs(int(frame['pts']) * base - (origin + i * step)) <= base / 2, f'Wrong PTS at frame {i}')
         subprocess.run(['ffmpeg', '-v', 'error', '-xerror', '-i', str(path), '-f', 'null', '-'],
                        check=True, capture_output=True, timeout=30)
@@ -97,16 +101,35 @@ def main():
     y4m = producer.stdout
     (directory / 'ffmpeg.y4m').write_bytes(y4m)
     output = directory / 'ffmpeg.mp4'
-    opts = ['--avsw', '-i', '-', '-o', output, *COLOR]
+    opts = ['--avsw', '-i', '-', '-o', output]
     result, parsed = execute('ffmpeg', opts, y4m)
     require(not result.stdout, 'File output logs polluted stdout')
     require(all(x['percent'] is None and x['eta_seconds'] is None for x in parsed if 'percent' in x), 'Invented Y4M length')
     require(parsed[-1]['frames'] == 37 and parsed[-1]['media_time'] == {'value': 37037, 'timescale': 30000}, 'Wrong media time')
-    verify(output, 37, 8)
+    defaults = dict(color_space='bt709', color_transfer='bt709', color_primaries='bt709', color_range='tv')
+    verify(output, 37, 8, color=defaults)
+    # VideoToolbox otherwise infers SD color tags from these dimensions.
+    untagged = directory / 'untagged-sd.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-i', output, '-c', 'copy', '-bsf:v',
+                    'h264_metadata=colour_primaries=2:transfer_characteristics=2:matrix_coefficients=2',
+                    '-color_primaries', 'unknown', '-color_trc', 'unknown', '-colorspace', 'unknown', untagged],
+                   check=True)
+    for mode in ['--avhw', '--avsw']:
+        path = directory / f'untagged-{mode[2:]}.mp4'
+        execute(path.stem, [mode, '-i', untagged, '-o', path])
+        verify(path, 37, 8, color=defaults)
+    full_range = y4m.replace(b'\n', b' XCOLORRANGE=FULL\n', 1)
+    for name, flags, expected in [
+        ('full-range', [], dict(defaults, color_range='pc')),
+        ('override', ['--vpp-colorspace', 'matrix=bt601:auto,range=limited:auto'], dict(defaults, color_space='smpte170m')),
+    ]:
+        path = directory / (name + '.mp4')
+        execute(name, ['--avsw', '-i', '-', '-o', path, *flags], full_range)
+        verify(path, 37, 8, color=expected)
     # File and stdin take the same avformat route; filename is deliberately not .y4m.
     disguised = directory / 'source.bin'
     disguised.write_bytes(y4m)
-    execute('y4m-file', ['--avsw', '-i', disguised, '-o', directory / 'file.mp4', *COLOR])
+    execute('y4m-file', ['--avsw', '-i', disguised, '-o', directory / 'file.mp4'])
     verify(directory / 'file.mp4', 37, 8)
     # Long FRAME extensions would drift FFmpeg's byte-offset-based timestamps.
     first = y4m.index(b'\n') + 1
@@ -126,8 +149,8 @@ def main():
     (directory/'ffmpeg10.y4m').write_bytes(ten)
     ten_output = directory/'ffmpeg10.mp4'
     execute('ffmpeg10', ['--avsw','-i','-','-o',ten_output,'--codec','hevc','--output-depth','10',
-                         '--input-chroma-loc','left',*COLOR], ten)
-    verify(ten_output, 37, 10)
+                         '--input-chroma-loc','left'], ten)
+    verify(ten_output, 37, 10, color=defaults)
     source_pixels = subprocess.run(['ffmpeg','-v','error','-i',str(directory/'ffmpeg10.y4m'),'-frames:v','1',
                                    '-pix_fmt','yuv420p10le','-f','rawvideo','-'], capture_output=True, check=True).stdout
     encoded_pixels = subprocess.run(['ffmpeg','-v','error','-i',str(ten_output),'-frames:v','1',
@@ -173,10 +196,9 @@ def main():
         path = directory / (name + '.mp4')
         execute(name, ['--avsw', '-i', '-', '-o', path, *COLOR], payload, code=1)
         require(not path.exists(), 'Invalid input published output')
-    for name, flags in [('missing-colors', []), ('default-decoder', COLOR), ('forced-hardware', ['--avhw', *COLOR])]:
+    for name, flags in [('default-decoder', []), ('forced-hardware', ['--avhw'])]:
         path = directory / (name + '.mp4')
         options = ['-i', '-', '-o', path, *flags]
-        if name == 'missing-colors': options += ['--avsw']
         result, _ = execute(name, options, y4m, code=1)
         require(b'restarting' not in result.stderr and not path.exists(), 'Non-replayable Y4M retried')
 

@@ -48,8 +48,8 @@ constexpr HelpOption options[] = {
       Encoder, filter, demux and output failures never trigger a retry. After stdout
       muxing starts, hardware decode failure is fatal to avoid concatenated streams.
       For Y4M use -i - --avsw without --input-res. Supported layouts are planar 4:2:0
-      8-bit and 10-bit little-endian. Missing color interpretation requires
-      --vpp-colorspace matrix/transfer/colorprim/range=FROM:auto; C420p10 without
+      8-bit and 10-bit little-endian. Missing matrix, transfer and primaries default
+      to BT.709; missing range defaults to limited. C420p10 without
       chroma metadata also needs --input-chroma-loc left|center|top-left.
       Check the producer exit status: clean EOF cannot reveal producer failure.
       Interlaced input needs --deinterlace bob, --vpp-ivtc or --vpp-yadif.
@@ -232,13 +232,13 @@ constexpr HelpOption options[] = {
 )"},
     {"Filters", "--input-matrix", "bt601|bt709|bt2020nc|smpte240m",
      "Override input YCbCr matrix interpretation.", R"(      Requires avformat input; bt2020 is also accepted as an alias for bt2020nc.
-      Use when required source matrix metadata is missing or incorrect.
+      The default reads the source matrix and uses BT.709 if absent.
       Cannot combine with --vpp-colorspace; use its matrix=FROM:TO pair instead.
 )"},
     {"Filters", "--output-matrix", "bt601|bt709|bt2020nc|smpte240m",
      "Convert YCbCr coefficients while retaining primaries and transfer.", R"(      Requires avformat input; bt2020 is also accepted as an alias for bt2020nc.
-      Default preserves the source matrix. Missing source metadata needs an explicit
-      input override. Cannot combine with --vpp-colorspace; use its matrix pair.
+      Default preserves the resolved input matrix.
+      Cannot combine with --vpp-colorspace; use its matrix pair.
 )"},
     {"Filters", "--input-chroma-loc", "left|center|top-left",
      "Override input chroma siting for Metal filters.", R"(      Requires avformat input. Use when required chroma location metadata is absent
@@ -304,7 +304,8 @@ constexpr HelpOption options[] = {
       --vpp-colorspace uses NVEnc-style matrix=FROM:TO,transfer=FROM:TO,
       colorprim=FROM:TO,range=FROM:TO pairs. Source auto reads frame/track metadata;
       destination auto preserves the resolved source (hdr2sdr defaults to BT.709).
-      Missing required source metadata fails.
+      Missing source fields default individually to BT.709 matrix, transfer and
+      primaries, and limited range. Set FROM to override the source interpretation.
       Matrix: bt601 (smpte170m/bt470bg), bt709, smpte240m, bt2020nc (bt2020).
       Transfer: bt709 (smpte170m/bt2020-10/bt2020-12), linear, srgb (iec61966-2-1),
       smpte2084 (pq), arib-std-b67 (hlg). Primaries: bt709, smpte170m (smpte240m),
