@@ -31,7 +31,7 @@ public:
     void capabilities(const EncoderCapabilities& capabilities, std::string_view version);
 private:
     void progress(std::string_view type, std::string_view extra = {});
-    bool json_, terminal_, line_open_ = false, finished_ = false, hardware_ = false;
+    bool json_, terminal_, line_open_ = false, finished_ = false, hardware_ = false, audio_only_ = false;
     std::atomic<bool> diagnostic_failed_{false};
     std::ostream& output_;
     std::mutex mutex_;

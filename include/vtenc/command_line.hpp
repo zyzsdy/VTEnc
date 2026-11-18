@@ -132,6 +132,7 @@ struct EncodeConfig {
     std::optional<double> quality;
     SyncMode sync = SyncMode::vfr;
     std::optional<std::array<int, 2>> dar; // Display aspect after orthogonal rotation.
+    bool audio_only = false;
     bool aac_audio = false;
     int audio_bitrate = 192000;
     int audio_sample_rate = 0; // Preserve source rate; only 44100/48000 accepted for AAC.

@@ -530,9 +530,7 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
     std::unique_ptr<AudioTranscoder> audio_encoder;
     if (config.aac_audio) {
         audio_encoder = std::make_unique<AudioTranscoder>(input, config, cancelled);
-        output_info.audio_parameters = audio_encoder->parameters();
-        output_info.audio_timebase_num = 1;
-        output_info.audio_timescale = output_info.audio_parameters->sample_rate;
+        output_info = audio_encoder->output_info();
     }
     const auto read_audio = [&]() { return audio_encoder ? audio_encoder->next() : input.read_audio(); };
     auto audio = read_audio();
@@ -576,6 +574,23 @@ static EncodeResult transcode_attempt(const EncodeConfig& config, const volatile
 }
 
 EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_atomic_t& cancelled) try {
+    if (config.audio_only) {
+        if (config.status) config.status->attempt(DecodeMode::software);
+        ContainerInput input(config, cancelled);
+        AudioTranscoder encoder(input, config, cancelled);
+        const auto info = encoder.output_info();
+        ContainerOutput output(config, info, nullptr, cancelled);
+        std::int64_t packets = 0;
+        while (auto packet = encoder.next()) {
+            output.append_audio(packet.get());
+            ++packets;
+            if (config.status) config.status->advance(0, {packet->pts, info.audio_timescale},
+                {std::max<std::int64_t>(0, packet->pts + packet->duration), info.audio_timescale});
+        }
+        if (config.status) config.status->check_diagnostics();
+        const auto bytes = output.finish(cancelled);
+        return {0, bytes, bytes == 0, packets};
+    }
     bool replayable = false;
     bool stdout_started = false;
     return with_decode_policy(config.decode, [&](DecodeMode mode) {

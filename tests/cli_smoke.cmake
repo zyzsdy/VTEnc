@@ -66,6 +66,7 @@ check_help_filter(--help vpp "--vpp-yadif;--vpp-ivtc;--vpp-colorspace;--vpp-subb
 check_help_filter(--help vpp-yadif "--vpp-yadif")
 check_help_filter(-h yadif "--vpp-yadif")
 check_help_filter(--help bitrate "--bitrate;--max-bitrate;--bitrate-window;--audio-bitrate")
+check_help_filter(--help audio-only "--audio-only")
 check_help_filter(--help quality "--quality")
 check_help_filter(--help input "--input;--input-res;--input-matrix;--input-chroma-loc")
 check_help_filter(--help help "--help")
@@ -285,6 +286,13 @@ string(JSON code GET "${err}" exit_code)
 if(NOT result EQUAL 2 OR NOT out STREQUAL "" OR NOT event STREQUAL "failed" OR NOT code EQUAL 2)
     message(FATAL_ERROR "Invalid JSON failure protocol: ${out} ${err}")
 endif()
+
+foreach(conflict IN ITEMS --audio-copy --no-audio --avhw --avsw --synthetic --vpp-yadif)
+    check_cli(2 "^$" "--audio-only cannot be combined" ${file_job} --audio-only ${conflict})
+endforeach()
+check_cli(2 "^$" "requires -f/--output-format" --audio-only -i missing -o -)
+check_cli(1 "^$" "avformat_open_input" ${file_job} --audio-bitrate 128 --audio-only --audio-samplerate 48000)
+check_cli(1 "^$" "avformat_open_input" ${file_job} --audio-only --audio-codec aac)
 
 # P5 explicit clock, display aspect and mutually exclusive audio modes.
 check_cli(2 "^$" "explicit --fps" ${file_job} --avsync cfr)

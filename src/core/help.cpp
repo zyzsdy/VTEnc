@@ -39,7 +39,7 @@ constexpr HelpOption options[] = {
       are discarded, but stdout bytes already written cannot be retracted.
 )"},
     {"Input and output", "-i, --input", "FILE",
-     "Read a media file, or use - for avformat stdin.", R"(      Compressed input: avformat probes any format; hardware-only encode.
+     "Read a media file, or use - for avformat stdin.", R"(      Compressed input: avformat probes any format. Video encoding requires hardware.
       No extension whitelist is used. --input-res instead selects tightly packed raw
       NV12/P010 input from a regular file; raw stdin is not supported.
       By default, try hardware decoding, then restart once with software decoding on
@@ -56,8 +56,8 @@ constexpr HelpOption options[] = {
       Dolby Vision is rejected, including when --vpp-colorspace is enabled.
 )"},
     {"Input and output", "-o, --output", "FILE",
-     "Write encoded video and selected audio to the destination.", R"(      Required for encoding. Existing files are never overwritten. avformat selects
-      the muxer from the filename; --output-format overrides it. Unknown formats and
+     "Write the encoded output to the destination.", R"(      Required for encoding. Existing files are never overwritten. avformat selects
+      the muxer from the filename (MP4 by default for --audio-only). -f overrides it. Unknown formats and
       incompatible streams fail. Metadata preservation depends on the container.
       Use -o - for stdout, with an explicit -f/--output-format. Only stream bytes go
       to stdout; logs go to stderr. The muxer must support non-seekable output.
@@ -184,6 +184,13 @@ constexpr HelpOption options[] = {
       final stored dimensions. With a DAR override, only orthogonal unit rotation or
       reflection is accepted.
 )"},
+    {"Audio", "--audio-only", "",
+     "Encode the first audio track of an audio or video input as AAC-LC.", R"(      Uses AudioToolbox and starts the output audio at zero. The default muxer is MP4
+      regardless of filename. Use -f to select another AAC-compatible muxer, e.g.
+      -f adts for an AAC stream. MP4 files preserve exact priming and padding;
+      other formats may include these samples in playback. For stdout, specify -f
+      and a non-seekable muxer. Accepts --audio-bitrate and --audio-samplerate.
+)"},
     {"Audio", "--audio-copy", "",
      "Copy the first audio track without re-encoding (default).", R"(      Requires avformat input. When present, the track codec must be accepted by the
       output muxer. Mutually exclusive with --no-audio and --audio-codec.
@@ -197,16 +204,15 @@ constexpr HelpOption options[] = {
      "Encode the first audio track as AudioToolbox AAC-LC.", R"(      Uses libavcodec audio decode and libswresample; mono/stereo only, no downmix.
       Default is 192 kbit/s ABR and the source sample rate; explicit sample rates are
       44100/48000 Hz. Unsupported settings and missing audio fail.
-      Requires avformat input and file output with verifiable priming/padding;
-      stdout supports copy/none. Movie AAC input requires a locally readable native
-      packet table for exact trims. Mutually exclusive with --audio-copy/--no-audio.
+      Video jobs require file output with verifiable priming/padding. Movie AAC input
+      requires a locally readable native packet table for exact trims. Mutually exclusive with --audio-copy/--no-audio.
 )"},
     {"Audio", "--audio-bitrate", "KBIT/S",
-     "Set AAC average bitrate (default: 192 kbit/s).", R"(      Requires --audio-codec aac. Accepts integers in 1..2147483; the encoder must
+     "Set AAC average bitrate (default: 192 kbit/s).", R"(      Requires --audio-codec aac or --audio-only. Accepts integers in 1..2147483; the encoder must
       support the requested setting or the job fails.
 )"},
     {"Audio", "--audio-samplerate", "44100|48000",
-     "Set AAC output sample rate in Hz.", R"(      Requires --audio-codec aac. By default the source rate is preserved;
+     "Set AAC output sample rate in Hz.", R"(      Requires --audio-codec aac or --audio-only. By default the source rate is preserved;
       unsupported encoder rates fail. Explicit rates are limited to 44100 or 48000.
 )"},
     {"Filters", "--crop", "LEFT,TOP,RIGHT,BOTTOM",
@@ -380,6 +386,7 @@ Usage:
   vtenc (--synthetic | -i RAW) -o OUTPUT --input-res WIDTHxHEIGHT --frames COUNT [OPTIONS]
 
 Examples:
+  vtenc --audio-only -i input.mkv -o soundtrack.m4a
   vtenc -i input.mkv -o output.mp4 --codec hevc --bitrate 5000
   vtenc -i input.mkv -o output.mp4 --vpp-yadif mode=bob --no-audio
   vtenc --synthetic --input-res 1920x1080 --frames 120 -o test.h264

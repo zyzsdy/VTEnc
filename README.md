@@ -89,6 +89,18 @@ vtenc -i input.mkv -o output-aac.mp4 \
 
 默认先尝试硬件解码，遇到解码失败时输出诊断，并在输入可重新读取的情况下从头软解重试一次。`--avhw` 强制硬解，失败即退出；`--avsw` 直接使用软解。编码、滤镜和输出错误不会触发软解重试。
 
+### 独立音频输出
+
+`--audio-only` 从视频或音频文件中读取第一条音轨，使用 AudioToolbox 编码为 AAC-LC。输出从第一个有效音频样本开始计时。默认封装为 MP4，与输出文件扩展名无关。
+
+```bash
+vtenc --audio-only -i movie.mkv -o soundtrack.m4a
+vtenc --audio-only -i recording.wav -o recording.mp4 --audio-bitrate 128 --audio-samplerate 48000
+vtenc --audio-only -i recording.flac -f adts -o recording.aac
+```
+
+默认码率为 192 kbit/s，保留源采样率。支持单声道和立体声，输出采样率为 44100 或 48000 Hz，其他源采样率可用 `--audio-samplerate` 显式转换。MP4 文件会校验 AAC 首尾的有效样本范围。使用 `-f` 时，首尾补样信息取决于所选封装器，例如 ADTS 会保留补样。写入标准输出可用 `-f adts -o -`。
+
 ### 常用视频处理
 
 ```bash

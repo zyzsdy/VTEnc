@@ -64,7 +64,15 @@ std::string configuration_json(const EncodeConfig& c, bool transcode) {
     const auto& f = c.filter; const auto& color = f.colorspace; const auto& t = color.tonemap; const auto& v = f.ivtc;
     s << "{\"input\":" << json_string(c.input) << ",\"input_kind\":" << json_string(transcode ? "avformat" : c.input.empty() ? "synthetic" : "raw")
       << ",\"output\":" << json_string(c.output) << ",\"output_format\":" << json_string(c.output_format)
-      << ",\"codec\":" << json_string(codec_name(c.video.codec)) << ",\"bit_depth\":" << c.video.bit_depth
+      << ",\"audio_codec\":" << json_string(c.aac_audio ? "aac" : c.copy_audio ? "copy" : "none")
+      << ",\"audio_backend\":" << (c.aac_audio ? "\"audiotoolbox\"" : "null")
+      << ",\"audio_bitrate\":" << (c.aac_audio ? std::to_string(c.audio_bitrate) : "null")
+      << ",\"audio_sample_rate\":" << (c.audio_sample_rate ? std::to_string(c.audio_sample_rate) : "null");
+    if (c.audio_only) {
+        s << ",\"audio_only\":true}";
+        return s.str();
+    }
+    s << ",\"codec\":" << json_string(codec_name(c.video.codec)) << ",\"bit_depth\":" << c.video.bit_depth
       << ",\"profile\":" << json_string(profile_name(c.video))
       << ",\"width\":" << (transcode ? "null" : std::to_string(c.video.width))
       << ",\"height\":" << (transcode ? "null" : std::to_string(c.video.height))
@@ -73,10 +81,6 @@ std::string configuration_json(const EncodeConfig& c, bool transcode) {
       << ",\"decoder\":" << json_string(decoder_name(c.decode)) << ",\"copy_audio\":" << c.copy_audio
       << ",\"avsync\":" << json_string(c.sync == SyncMode::vfr ? "vfr" : c.sync == SyncMode::cfr ? "cfr" : "forcecfr")
       << ",\"dar\":" << (c.dar ? time_json({(*c.dar)[0], (*c.dar)[1]}) : "null")
-      << ",\"audio_codec\":" << json_string(c.aac_audio ? "aac" : c.copy_audio ? "copy" : "none")
-      << ",\"audio_backend\":" << (c.aac_audio ? "\"audiotoolbox\"" : "null")
-      << ",\"audio_bitrate\":" << (c.aac_audio ? std::to_string(c.audio_bitrate) : "null")
-      << ",\"audio_sample_rate\":" << (c.audio_sample_rate ? std::to_string(c.audio_sample_rate) : "null")
       << ",\"gop\":" << c.gop << ",\"bitrate\":" << (c.quality ? "null" : std::to_string(c.bitrate)) << ",\"quality\":";
     if (c.quality) s << *c.quality; else s << "null";
     s << ",\"rate_control\":" << json_string(c.quality ? "quality" : c.rate_control == RateControl::constant ? "cbr" : c.rate_control == RateControl::variable ? "vbr" : "abr")
@@ -146,6 +150,7 @@ void StatusReporter::diagnostic(std::string_view message, std::optional<std::int
     output_ << message << '\n' << std::flush;
 }
 void StatusReporter::start(const EncodeConfig& config, bool transcode, std::string_view version) {
+    audio_only_ = config.audio_only;
     event("start", "\"version\":" + json_string(version) + "," + platform_fields() + ",\"config\":" + configuration_json(config, transcode));
 }
 void StatusReporter::attempt(DecodeMode mode, bool raw) {
@@ -193,7 +198,10 @@ void StatusReporter::progress(std::string_view type, std::string_view extra) {
     } else {
         s << std::fixed << std::setprecision(1);
         if (total > 0) s << '[' << percent << "%] ";
-        s << frames_ << " frames, " << media << "s media, " << elapsed << "s elapsed, " << fps << " fps, " << speed << 'x';
+        if (!audio_only_) s << frames_ << " frames, ";
+        s << media << "s media, " << elapsed << "s elapsed, ";
+        if (!audio_only_) s << fps << " fps, ";
+        s << speed << 'x';
         if (total > 0 && media > 0) s << ", ETA " << (complete ? 0 : eta) << 's';
         std::lock_guard lock(mutex_);
         if (terminal_) output_ << '\r' << "\033[2K";

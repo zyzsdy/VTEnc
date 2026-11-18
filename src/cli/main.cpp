@@ -139,11 +139,18 @@ int main(int argc, char* argv[]) {
                                           : vtenc::encode_video(options.encode, interrupted);
             reporter.check_diagnostics();
             if (result.cancelled) {
-                std::cerr << "vtenc: cancelled; drained " << result.frames << " frames; "
-                          << (stdout_output ? "stdout may contain incomplete output; written bytes cannot be retracted\n"
+                std::cerr << "vtenc: cancelled; ";
+                if (!options.encode.audio_only) std::cerr << "drained " << result.frames << " frames; ";
+                std::cerr << (stdout_output ? "stdout may contain incomplete output; written bytes cannot be retracted\n"
                                             : "incomplete output discarded\n");
                 reporter.finish(result);
                 return 130;
+            }
+            if (options.encode.audio_only) {
+                log << "Encoded " << result.audio_samples << " AAC packets, " << result.bytes
+                    << " bytes\nOutput: " << options.encode.output << '\n';
+                reporter.finish(result);
+                break;
             }
             log << "Hardware verified: yes\nEncoded " << result.frames << " frames, " << result.bytes
                       << " bytes (" << vtenc::codec_name(options.encode.video.codec) << ' '

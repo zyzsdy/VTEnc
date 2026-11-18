@@ -40,10 +40,12 @@ struct AudioTranscoder::Impl {
     AVAudioFifo* fifo = nullptr;
     AudioConverterRef converter = nullptr;
     AVRational input_base{};
+    CMTime pts_tolerance = kCMTimeInvalid;
     int source_rate = 0, rate = 0, channels = 0, source_format = -1;
     AVChannelLayout layout{};
     bool decoder_flushed = false, pcm_eof = false, encoded_eof = false;
     bool have_origin = false, first_packet = true;
+    bool audio_only = false;
     CMTime source_origin = kCMTimeInvalid;
     std::int64_t origin = 0, source_samples = 0, output_samples = 0, packet_index = 0;
     std::optional<std::int64_t> source_limit;
@@ -90,17 +92,15 @@ struct AudioTranscoder::Impl {
             const auto pts = media_time(decoded->pts, input_base, "decoded audio PTS");
             if (!have_origin) {
                 have_origin = true; source_origin = pts;
-                origin = av_rescale_q(decoded->pts, input_base, {1, rate});
-                if (CMTimeCompare(pts, CMTimeMake(origin, rate)) != 0)
+                origin = audio_only ? 0 : av_rescale_q(decoded->pts, input_base, {1, rate});
+                if (!audio_only && CMTimeCompare(pts, CMTimeMake(origin, rate)) != 0)
                     std::cerr << "vtenc: AAC start rounded to nearest output sample (at most half a sample)\n";
             }
             const auto expected = CMTimeAdd(source_origin, CMTimeMake(source_samples, source_rate));
             const auto difference = CMTimeAbsoluteValue(CMTimeSubtract(pts, expected));
-            // Quantized container PTS may differ by half a tick; never accumulate this rounding.
-            const auto tick = CMTimeMake(input_base.num, input_base.den);
             if (!CMTIME_IS_NUMERIC(expected) || CMTIME_HAS_BEEN_ROUNDED(expected) ||
-                CMTimeCompare(CMTimeMultiply(difference, 2), tick) > 0)
-                throw std::runtime_error("Discontinuous decoded audio PTS: AAC requires a continuous sample timeline; use --audio-copy or --no-audio");
+                CMTimeCompare(difference, pts_tolerance) > 0)
+                throw std::runtime_error("Discontinuous decoded audio PTS: AAC requires a continuous sample timeline");
             if (source_limit) {
                 count = static_cast<int>(std::min<std::int64_t>(count, *source_limit - source_samples));
                 if (!count) return; // Still drain decoder; these are explicitly declared trailing samples.
@@ -188,6 +188,7 @@ AudioTranscoder::AudioTranscoder(ContainerInput& input, const EncodeConfig& conf
                                const volatile std::sig_atomic_t& cancelled)
     : impl_(std::make_unique<Impl>(input, cancelled)) {
     auto& s = *impl_;
+    s.audio_only = config.audio_only;
     const auto* p = input.info().audio_parameters;
     if (!p) throw std::runtime_error("--audio-codec aac requires an input audio track");
     if (p->codec_type != AVMEDIA_TYPE_AUDIO) throw std::runtime_error("Selected AAC source is not audio");
@@ -197,6 +198,11 @@ AudioTranscoder::AudioTranscoder(ContainerInput& input, const EncodeConfig& conf
     s.parameters = avcodec_parameters_alloc();
     if (!s.decoder || !s.frame || !s.parameters) throw std::bad_alloc();
     av_check(avcodec_parameters_to_context(s.decoder, p), "Configure audio decoder");
+    // PCM files commonly give only a channel count. Mono and stereo can be
+    // described directly without downmixing or changing the sample order.
+    auto& layout = s.decoder->ch_layout;
+    if (config.audio_only && layout.order == AV_CHANNEL_ORDER_UNSPEC && (layout.nb_channels == 1 || layout.nb_channels == 2))
+        av_channel_layout_default(&layout, layout.nb_channels);
     s.input_base = {input.info().audio_timebase_num, input.info().audio_timescale};
     s.decoder->pkt_timebase = s.input_base;
     s.decoder->err_recognition = AV_EF_EXPLODE;
@@ -211,6 +217,11 @@ AudioTranscoder::AudioTranscoder(ContainerInput& input, const EncodeConfig& conf
     if (s.rate != 44100 && s.rate != 48000)
         throw std::runtime_error("AAC currently supports 44100/48000 Hz; use --audio-samplerate explicitly");
     if (s.source_rate <= 0) throw std::runtime_error("Invalid decoded audio sample rate");
+    // Standalone tracks with a fractional number of ticks per sample can
+    // accumulate rounding at the origin and within demuxed packets (e.g. TS).
+    const auto tick = CMTimeMake(s.input_base.num, s.input_base.den);
+    const bool fractional_ticks = s.input_base.den % (std::int64_t{s.source_rate} * s.input_base.num) != 0;
+    s.pts_tolerance = s.audio_only && fractional_ticks ? CMTimeMultiply(tick, 2) : CMTimeMultiplyByRatio(tick, 1, 2);
     av_check(av_channel_layout_copy(&s.layout, &s.frame->ch_layout), "Copy audio channel layout");
     av_check(swr_alloc_set_opts2(&s.resampler, &s.layout, AV_SAMPLE_FMT_FLT, s.rate,
         &s.layout, static_cast<AVSampleFormat>(s.source_format), s.source_rate, 0, nullptr), "Create audio resampler");
@@ -255,7 +266,13 @@ AudioTranscoder::AudioTranscoder(ContainerInput& input, const EncodeConfig& conf
               << ", channels=" << s.channels << ", priming=" << s.priming << " samples\n";
 }
 AudioTranscoder::~AudioTranscoder() = default;
-const AVCodecParameters* AudioTranscoder::parameters() const { return impl_->parameters; }
+MediaInfo AudioTranscoder::output_info() const {
+    auto info = impl_->input.info();
+    info.audio_parameters = impl_->parameters;
+    info.audio_timebase_num = 1;
+    info.audio_timescale = info.audio_parameters->sample_rate;
+    return info;
+}
 PacketPtr AudioTranscoder::next() {
     auto& s = *impl_;
     s.check_cancel();

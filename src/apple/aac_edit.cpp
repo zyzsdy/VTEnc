@@ -59,7 +59,8 @@ std::int64_t movie_aac_valid_samples(const std::string& path, int rate, int chan
         AudioFileID value = nullptr;
         ~AudioFile() { if (value) AudioFileClose(value); }
     } audio;
-    check_status(AudioFileOpenURL(url.get(), kAudioFileReadPermission, 0, &audio.value), "Read AAC movie trim metadata (local file required)");
+    // The demuxer identified a movie even if the path has a different extension.
+    check_status(AudioFileOpenURL(url.get(), kAudioFileReadPermission, kAudioFileMPEG4Type, &audio.value), "Read AAC movie trim metadata (local file required)");
     UInt32 track = 0;
     check_status(AudioFileSetProperty(audio.value, kAudioFilePropertyUseAudioTrack, sizeof(track), &track), "Select first AAC movie metadata track");
     AudioStreamBasicDescription format{}; UInt32 size = sizeof(format);

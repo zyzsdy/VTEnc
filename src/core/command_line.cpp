@@ -124,7 +124,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (arg == "--output") arg = "-o";
         if (arg == "-u") arg = "--preset";
         if (arg == "-f") arg = "--output-format";
-        if (arg != "--vpp-subburn" && !seen.insert(arg).second) throw std::invalid_argument("Duplicate option: " + std::string(arg));
+        if (!seen.insert(arg).second && arg != "--vpp-subburn") throw std::invalid_argument("Duplicate option: " + std::string(arg));
         if (arg == "--help" || arg == "--version" || arg == "--check-device" || arg == "--check-features") {
             if (has_command) throw std::invalid_argument("Specify exactly one command");
             has_command = true;
@@ -148,6 +148,11 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         }
         if (arg == "--avhw" || arg == "--avsw") {
             result.encode.decode = arg == "--avhw" ? DecodeMode::hardware : DecodeMode::software;
+            encode_options = true;
+            continue;
+        }
+        if (arg == "--audio-only") {
+            result.encode.audio_only = true;
             encode_options = true;
             continue;
         }
@@ -351,6 +356,15 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
             result.encode.quality = quality;
         }
     }
+    if (result.encode.audio_only) {
+        for (const auto option : seen) {
+            if (option != "--audio-only" && option != "-i" && option != "-o" && option != "--output-format" &&
+                option != "--audio-codec" && option != "--audio-bitrate" && option != "--audio-samplerate" && option != "--json-status")
+                throw std::invalid_argument("--audio-only cannot be combined with " + std::string(option));
+        }
+        result.encode.aac_audio = true;
+        result.encode.copy_audio = false;
+    }
     if (seen.contains("--vpp-colorspace") && (seen.contains("--input-matrix") || seen.contains("--output-matrix") || seen.contains("--output-range"))) {
         throw std::invalid_argument("--vpp-colorspace cannot be combined with --input-matrix, --output-matrix or --output-range; use its matrix/range pairs");
     }
@@ -374,7 +388,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         static_cast<int>(seen.contains("--audio-codec")) > 1)
         throw std::invalid_argument("--audio-copy, --no-audio and --audio-codec are mutually exclusive");
     if ((seen.contains("--audio-bitrate") || seen.contains("--audio-samplerate")) && !result.encode.aac_audio)
-        throw std::invalid_argument("--audio-bitrate/--audio-samplerate require --audio-codec aac");
+        throw std::invalid_argument("--audio-bitrate/--audio-samplerate require --audio-codec aac or --audio-only");
     if (result.encode.hdr.mode == HdrMetadataMode::clear && (result.encode.hdr.mastering || result.encode.hdr.light))
         throw std::invalid_argument("--hdr-metadata clear conflicts with explicit HDR metadata");
     if (encode_options) {
@@ -389,6 +403,7 @@ CommandLine parse_command_line(std::span<const std::string_view> args) {
         if (result.encode.output == "-" && result.encode.output_format.empty()) {
             throw std::invalid_argument("-o - requires -f/--output-format to select the stdout muxer");
         }
+        if (result.encode.audio_only && result.encode.output_format.empty()) result.encode.output_format = "mp4";
         // Compressed input is probed by avformat, independent of its extension.
         // --input-res explicitly selects the existing tightly packed raw path.
         if (!synthetic && !seen.contains("--input-res")) {

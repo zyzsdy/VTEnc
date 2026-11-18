@@ -8,7 +8,7 @@ public:
     AudioTranscoder(ContainerInput& input, const EncodeConfig& config,
                     const volatile std::sig_atomic_t& cancelled);
     ~AudioTranscoder();
-    const AVCodecParameters* parameters() const;
+    [[nodiscard]] MediaInfo output_info() const;
     PacketPtr next();
 private:
     struct Impl;

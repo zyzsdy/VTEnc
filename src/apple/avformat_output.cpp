@@ -69,6 +69,64 @@ struct ContainerOutput::Impl {
     std::int64_t aac_packets = 0, aac_first_pts = 0;
     std::uint32_t aac_priming = 0, aac_padding = 0;
     bool finished = false;
+    void add_video(const EncodeConfig& config, const MediaInfo& info, CMFormatDescriptionRef format) {
+        video = avformat_new_stream(mux, nullptr);
+        if (!video) throw std::bad_alloc();
+        const int filter_scale = config.filter.yadif.enabled ? yadif_output_timescale(info.video_timescale, config.filter.yadif.bob) : config.filter.bob ? bob_timescale(info.video_timescale) :
+            (config.filter.ivtc.enabled ? ivtc_output_timescale(info.video_timescale, config.filter.ivtc) : info.video_timescale);
+        const int scale = config.sync == SyncMode::vfr ? filter_scale : timeline_timescale(filter_scale, config.fps_num);
+        video->time_base = {1, scale};
+        if (config.sync != SyncMode::vfr) video->avg_frame_rate = {config.fps_num, config.fps_den};
+        auto* p = video->codecpar;
+        const auto dimensions = CMVideoFormatDescriptionGetDimensions(format);
+        p->codec_type = AVMEDIA_TYPE_VIDEO;
+        p->codec_id = config.video.codec == Codec::h264 ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
+        // Let the muxer choose its codec tag. Prefer hvc1 only where its tag table
+        // explicitly supports it, retaining the existing MP4/QuickTime behavior.
+        if (p->codec_id == AV_CODEC_ID_HEVC && mux->oformat->codec_tag &&
+            av_codec_get_id(mux->oformat->codec_tag, MKTAG('h','v','c','1')) == AV_CODEC_ID_HEVC) {
+            p->codec_tag = MKTAG('h','v','c','1');
+        }
+        p->width = dimensions.width; p->height = dimensions.height;
+        p->format = config.video.bit_depth == 10 ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P;
+        p->field_order = AV_FIELD_PROGRESSIVE;
+        p->chroma_location = AVCHROMA_LOC_LEFT;
+        copy_extradata(p, format, config.video.codec == Codec::h264 ? CFSTR("avcC") : CFSTR("hvcC"));
+        const auto get = [&](CFStringRef key) { return CMFormatDescriptionGetExtension(format, key); };
+        if (const auto value = get(kCVImageBufferColorPrimariesKey)) p->color_primaries = static_cast<AVColorPrimaries>(CVColorPrimariesGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
+        if (const auto value = get(kCVImageBufferTransferFunctionKey)) p->color_trc = static_cast<AVColorTransferCharacteristic>(CVTransferFunctionGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
+        if (const auto value = get(kCVImageBufferYCbCrMatrixKey)) p->color_space = static_cast<AVColorSpace>(CVYCbCrMatrixGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
+        export_hdr_metadata(p,format);
+        const auto full = get(kCMFormatDescriptionExtension_FullRangeVideo);
+        p->color_range = full && CFEqual(full, kCFBooleanTrue) ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+        if (const auto ratio = get(kCVImageBufferPixelAspectRatioKey)) {
+            if (CFGetTypeID(ratio) != CFDictionaryGetTypeID()) throw std::runtime_error("Invalid pixel aspect ratio dictionary");
+            p->sample_aspect_ratio = {integer(static_cast<CFDictionaryRef>(ratio), kCVImageBufferPixelAspectRatioHorizontalSpacingKey),
+                                      integer(static_cast<CFDictionaryRef>(ratio), kCVImageBufferPixelAspectRatioVerticalSpacingKey)};
+            video->sample_aspect_ratio = p->sample_aspect_ratio;
+        }
+        if (info.transform != std::array<double, 6>{1, 0, 0, 1, 0, 0}) {
+            auto t = info.transform;
+            const auto source_size = CMVideoFormatDescriptionGetDimensions(info.video_format);
+            const auto min_x = [&](CMVideoDimensions size) { return std::min(0.0, t[0] * size.width) + std::min(0.0, t[2] * size.height); };
+            const auto min_y = [&](CMVideoDimensions size) { return std::min(0.0, t[1] * size.width) + std::min(0.0, t[3] * size.height); };
+            t[4] += min_x(source_size) - min_x(dimensions);
+            t[5] += min_y(source_size) - min_y(dimensions);
+            std::array<std::int32_t, 9> matrix{};
+            for (std::size_t i = 0; i < t.size(); ++i) {
+                const auto value = t[i] * 65536.0;
+                if (!std::isfinite(value) || value != std::trunc(value) || value < std::numeric_limits<std::int32_t>::min() || value > std::numeric_limits<std::int32_t>::max()) {
+                    throw std::runtime_error("Display transform cannot be represented exactly");
+                }
+                constexpr std::array<std::size_t, 6> indices{0, 1, 3, 4, 6, 7};
+                matrix[indices[i]] = static_cast<std::int32_t>(value);
+            }
+            matrix[8] = 1 << 30;
+            auto* side = av_packet_side_data_new(&p->coded_side_data, &p->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX, sizeof(matrix), 0);
+            if (!side) throw std::bad_alloc();
+            std::memcpy(side->data, matrix.data(), sizeof(matrix));
+        }
+    }
     void verify_aac_file() {
         // No muxer whitelist: verify the actual chosen container before publication.
         // In particular transport/elementary streams can accept AAC but lose trims.
@@ -162,7 +220,9 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
                                  const volatile std::sig_atomic_t& cancelled)
     : impl_(std::make_unique<Impl>()) {
     auto& s = *impl_;
-    s.verify_aac = config.aac_audio;
+    // A/V jobs require exact audio trims on the shared timeline. Standalone
+    // output also finalizes movie edits, and permits AAC stream formats such as ADTS.
+    s.verify_aac = config.aac_audio && !config.audio_only;
     if (s.verify_aac && config.output == "-")
         throw std::runtime_error("AAC transcoding requires file output to verify muxed priming/padding before publication; stdout supports audio-copy/no-audio");
     s.destination = config.output;
@@ -197,65 +257,10 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
         return s.mux->priv_data && av_opt_find(s.mux->priv_data, name, nullptr, 0, 0);
     };
     const bool movie_clock = has_option("movie_timescale");
-    s.movie_aac_edit = s.verify_aac && movie_clock && has_option("use_editlist");
+    s.movie_aac_edit = config.aac_audio && !s.stdout_output && movie_clock && has_option("use_editlist");
     s.mux->avoid_negative_ts = AVFMT_AVOID_NEG_TS_DISABLED;
-    s.video = avformat_new_stream(s.mux, nullptr);
-    if (!s.video) throw std::bad_alloc();
-    const int filter_scale = config.filter.yadif.enabled ? yadif_output_timescale(info.video_timescale, config.filter.yadif.bob) : config.filter.bob ? bob_timescale(info.video_timescale) :
-        (config.filter.ivtc.enabled ? ivtc_output_timescale(info.video_timescale, config.filter.ivtc) : info.video_timescale);
-    const int scale = config.sync == SyncMode::vfr ? filter_scale : timeline_timescale(filter_scale, config.fps_num);
-    s.video->time_base = {1, scale};
-    if (config.sync != SyncMode::vfr) s.video->avg_frame_rate = {config.fps_num, config.fps_den};
-    auto* p = s.video->codecpar;
-    const auto dimensions = CMVideoFormatDescriptionGetDimensions(format);
-    p->codec_type = AVMEDIA_TYPE_VIDEO;
-    p->codec_id = config.video.codec == Codec::h264 ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
-    // Let the muxer choose its codec tag. Prefer hvc1 only where its tag table
-    // explicitly supports it, retaining the existing MP4/QuickTime behavior.
-    if (p->codec_id == AV_CODEC_ID_HEVC && s.mux->oformat->codec_tag &&
-        av_codec_get_id(s.mux->oformat->codec_tag, MKTAG('h','v','c','1')) == AV_CODEC_ID_HEVC) {
-        p->codec_tag = MKTAG('h','v','c','1');
-    }
-    p->width = dimensions.width; p->height = dimensions.height;
-    p->format = config.video.bit_depth == 10 ? AV_PIX_FMT_YUV420P10LE : AV_PIX_FMT_YUV420P;
-    p->field_order = AV_FIELD_PROGRESSIVE;
-    p->chroma_location = AVCHROMA_LOC_LEFT;
-    copy_extradata(p, format, config.video.codec == Codec::h264 ? CFSTR("avcC") : CFSTR("hvcC"));
-    const auto get = [&](CFStringRef key) { return CMFormatDescriptionGetExtension(format, key); };
-    if (const auto value = get(kCVImageBufferColorPrimariesKey)) p->color_primaries = static_cast<AVColorPrimaries>(CVColorPrimariesGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
-    if (const auto value = get(kCVImageBufferTransferFunctionKey)) p->color_trc = static_cast<AVColorTransferCharacteristic>(CVTransferFunctionGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
-    if (const auto value = get(kCVImageBufferYCbCrMatrixKey)) p->color_space = static_cast<AVColorSpace>(CVYCbCrMatrixGetIntegerCodePointForString(static_cast<CFStringRef>(value)));
-    export_hdr_metadata(p,format);
-    const auto full = get(kCMFormatDescriptionExtension_FullRangeVideo);
-    p->color_range = full && CFEqual(full, kCFBooleanTrue) ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
-    if (const auto ratio = get(kCVImageBufferPixelAspectRatioKey)) {
-        if (CFGetTypeID(ratio) != CFDictionaryGetTypeID()) throw std::runtime_error("Invalid pixel aspect ratio dictionary");
-        p->sample_aspect_ratio = {integer(static_cast<CFDictionaryRef>(ratio), kCVImageBufferPixelAspectRatioHorizontalSpacingKey),
-                                  integer(static_cast<CFDictionaryRef>(ratio), kCVImageBufferPixelAspectRatioVerticalSpacingKey)};
-        s.video->sample_aspect_ratio = p->sample_aspect_ratio;
-    }
-    if (info.transform != std::array<double, 6>{1, 0, 0, 1, 0, 0}) {
-        auto t = info.transform;
-        const auto source_size = CMVideoFormatDescriptionGetDimensions(info.video_format);
-        const auto min_x = [&](CMVideoDimensions size) { return std::min(0.0, t[0] * size.width) + std::min(0.0, t[2] * size.height); };
-        const auto min_y = [&](CMVideoDimensions size) { return std::min(0.0, t[1] * size.width) + std::min(0.0, t[3] * size.height); };
-        t[4] += min_x(source_size) - min_x(dimensions);
-        t[5] += min_y(source_size) - min_y(dimensions);
-        std::array<std::int32_t, 9> matrix{};
-        for (std::size_t i = 0; i < t.size(); ++i) {
-            const auto value = t[i] * 65536.0;
-            if (!std::isfinite(value) || value != std::trunc(value) || value < std::numeric_limits<std::int32_t>::min() || value > std::numeric_limits<std::int32_t>::max()) {
-                throw std::runtime_error("Display transform cannot be represented exactly");
-            }
-            constexpr std::array<std::size_t, 6> indices{0, 1, 3, 4, 6, 7};
-            matrix[indices[i]] = static_cast<std::int32_t>(value);
-        }
-        matrix[8] = 1 << 30;
-        auto* side = av_packet_side_data_new(&p->coded_side_data, &p->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX, sizeof(matrix), 0);
-        if (!side) throw std::bad_alloc();
-        std::memcpy(side->data, matrix.data(), sizeof(matrix));
-    }
-    std::int64_t movie_scale = scale;
+    if (!config.audio_only) s.add_video(config, info, format);
+    std::int64_t movie_scale = s.video ? s.video->time_base.den : 1;
     if (info.audio_parameters) {
         s.audio = avformat_new_stream(s.mux, nullptr);
         if (!s.audio) throw std::bad_alloc();
@@ -278,11 +283,11 @@ ContainerOutput::ContainerOutput(const EncodeConfig& config, const MediaInfo& in
     av_check(avio_open2(&s.mux->pb, target, AVIO_FLAG_WRITE,
                        s.stdout_output ? &interrupt : nullptr, nullptr), "avio_open output");
     AVDictionary* options = nullptr;
-    if (has_option("video_track_timescale")) av_dict_set_int(&options, "video_track_timescale", scale, 0);
+    if (s.video && has_option("video_track_timescale")) av_dict_set_int(&options, "video_track_timescale", s.video->time_base.den, 0);
     if (movie_clock) av_dict_set_int(&options, "movie_timescale", movie_scale, 0);
     const int status = avformat_write_header(s.mux, &options);
     av_dict_free(&options);
-    av_check(status, s.stdout_output
+    av_check(status, config.audio_only ? "avformat_write_header [selected muxer must accept AAC and the output destination]" : s.stdout_output
         ? "avformat_write_header [stdout requires a non-seekable muxer accepting the video codec and selected audio; use --no-audio to omit audio]"
         : "avformat_write_header [selected muxer must accept the video codec and selected audio; use --no-audio to omit audio]");
 }
@@ -312,7 +317,7 @@ void ContainerOutput::append_video(CMSampleBufferRef sample) {
 void ContainerOutput::append_audio(const AVPacket* source) {
     auto& s = *impl_; s.check();
     if (!s.audio) throw std::runtime_error("No audio stream in muxer");
-    if (s.verify_aac) {
+    if (s.movie_aac_edit || s.verify_aac) {
         if (s.aac_packets == 0) s.aac_first_pts = source->pts;
         std::size_t size = 0;
         const auto* trim = av_packet_get_side_data(source, AV_PKT_DATA_SKIP_SAMPLES, &size);
@@ -331,7 +336,7 @@ void ContainerOutput::append_audio(const AVPacket* source) {
     packet->dts = source->dts == AV_NOPTS_VALUE ? packet->pts : audio_ticks(source->dts, "audio DTS");
     packet->duration = audio_ticks(s.movie_aac_edit ? 1024 : source->duration, "audio duration");
     packet->pos = -1; packet->stream_index = s.audio->index;
-    av_check(av_interleaved_write_frame(s.mux, packet.get()), "av_interleaved_write_frame [audio; use --no-audio if unsupported]");
+    av_check(av_interleaved_write_frame(s.mux, packet.get()), "av_interleaved_write_frame [audio]");
     s.check();
 }
 std::uint64_t ContainerOutput::finish(const volatile std::sig_atomic_t& cancelled) {

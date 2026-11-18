@@ -326,7 +326,14 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
     // No format/extension whitelist and no AVFoundation input dependency.
     s.check(avformat_open_input(&s.demux, config.input == "-" ? "pipe:0" : config.input.c_str(), nullptr, nullptr), "avformat_open_input");
     s.y4m = std::string_view(s.demux->iformat->name) == "yuv4mpegpipe";
-    if (s.y4m) {
+    if (config.audio_only) {
+        for (unsigned i = 0; i < s.demux->nb_streams; ++i) {
+            auto* stream = s.demux->streams[i];
+            if (stream->codecpar->codec_type != AVMEDIA_TYPE_AUDIO && stream->codecpar->codec_type != AVMEDIA_TYPE_UNKNOWN)
+                stream->discard = AVDISCARD_ALL;
+        }
+    }
+    if (s.y4m && !config.audio_only) {
         if (config.decode != DecodeMode::software) throw std::runtime_error("Y4M input requires explicit --avsw (raw frames do not use hardware decoding)");
         s.validate_y4m_header();
         // Y4M's header already supplies all stream parameters. Read-ahead probing
@@ -335,10 +342,22 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
     s.info.replayable = s.demux->pb && (s.demux->pb->seekable & AVIO_SEEKABLE_NORMAL);
     for (unsigned i = 0; i < s.demux->nb_streams; ++i) {
         const auto* p = s.demux->streams[i]->codecpar;
-        if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
+        if (!config.audio_only && p->codec_type == AVMEDIA_TYPE_VIDEO) {
             if (s.video >= 0) throw std::runtime_error("Input requires exactly one video track");
             s.video = static_cast<int>(i);
         } else if (p->codec_type == AVMEDIA_TYPE_AUDIO && s.audio < 0 && (config.copy_audio || config.aac_audio)) s.audio = static_cast<int>(i);
+    }
+    if (s.audio >= 0) {
+        const auto* audio = s.demux->streams[s.audio];
+        if (audio->time_base.num <= 0 || audio->time_base.den <= 0) throw std::runtime_error("Invalid audio time base");
+        s.info.audio_parameters = audio->codecpar;
+        s.info.audio_edit_list = s.demux->priv_data && av_opt_find(s.demux->priv_data, "ignore_editlist", nullptr, 0, 0);
+        s.info.audio_timescale = audio->time_base.den;
+        s.info.audio_timebase_num = audio->time_base.num;
+    }
+    if (config.audio_only) {
+        if (s.audio < 0) throw std::runtime_error("--audio-only requires an input audio track");
+        return;
     }
     if (s.video < 0) throw std::runtime_error("avformat found no video track");
     const auto* stream = s.demux->streams[s.video];
@@ -384,14 +403,6 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
         if (matrix[2] || matrix[5] || matrix[8] != (1 << 30)) throw std::runtime_error("Perspective display transforms are unsupported");
         s.info.transform = {matrix[0] / 65536.0, matrix[1] / 65536.0, matrix[3] / 65536.0,
                             matrix[4] / 65536.0, matrix[6] / 65536.0, matrix[7] / 65536.0};
-    }
-    if (s.audio >= 0) {
-        const auto* audio = s.demux->streams[s.audio];
-        if (audio->time_base.num <= 0 || audio->time_base.den <= 0) throw std::runtime_error("Invalid audio time base");
-        s.info.audio_parameters = audio->codecpar;
-        s.info.audio_edit_list = s.demux->priv_data && av_opt_find(s.demux->priv_data, "ignore_editlist", nullptr, 0, 0);
-        s.info.audio_timescale = audio->time_base.den;
-        s.info.audio_timebase_num = audio->time_base.num;
     }
 }
 ContainerInput::~ContainerInput() = default;
