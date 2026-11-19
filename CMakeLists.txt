@@ -4,7 +4,6 @@ cmake_minimum_required(VERSION 3.25)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Target architecture")
 project(VTEnc VERSION 0.1.0 LANGUAGES CXX OBJCXX)
-set(VTENC_VERSION_SUFFIX "-beta.1" CACHE STRING "Release version suffix")
 
 if(NOT APPLE OR NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     message(FATAL_ERROR "VTEnc requires macOS and the Apple SDK.")
@@ -93,12 +92,12 @@ foreach(framework CoreFoundation CoreMedia CoreVideo VideoToolbox AudioToolbox F
 endforeach()
 
 add_executable(vtenc src/cli/main.cpp)
-target_compile_definitions(vtenc PRIVATE VTENC_VERSION="${PROJECT_VERSION}${VTENC_VERSION_SUFFIX}")
+target_compile_definitions(vtenc PRIVATE VTENC_VERSION="${PROJECT_VERSION}")
 target_compile_definitions(vtenc PRIVATE
     VTENC_BUILD_INFO="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}, C++${CMAKE_CXX_STANDARD}, $<CONFIG>")
 target_link_libraries(vtenc PRIVATE vtenc_apple vtenc_options)
 install(TARGETS vtenc RUNTIME DESTINATION bin)
-install(FILES THIRD_PARTY_NOTICES.md DESTINATION share/doc/vtenc)
+install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION share/doc/vtenc)
 
 include(CTest)
 if(BUILD_TESTING)

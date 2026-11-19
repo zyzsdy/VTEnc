@@ -139,7 +139,7 @@ def main():
                 'ffmpeg': {'license': license_, 'configuration': configuration.replace(str(ROOT), '<VTENC_SOURCE>'),
                            'encoder_count': 0}, 'files': records,
                 'dependencies': json.loads((ROOT / 'scripts/dependencies.json').read_text())}
-    for file in ('README.md', 'THIRD_PARTY_NOTICES.md'):
+    for file in ('README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'):
         shutil.copy2(ROOT / file, docs / file)
     # Keep the repository's development documents online, not in the binary ZIP.
     readme = docs / 'README.md'

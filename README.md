@@ -4,7 +4,7 @@ VTEnc 是面向 Apple Silicon Mac 的命令行视频编码工具，使用 VideoT
 
 视频编码始终使用硬件。具体编码格式、位深和控制选项是否可用，取决于运行时的 macOS、硬件和任务配置。
 
-项目受到 [NVEnc](https://github.com/rigaya/NVEnc) 的启发，并使用了其中部分代码。相关版权及许可证见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+VTEnc 采用 [MIT 许可证](LICENSE)。项目受到 [NVEnc](https://github.com/rigaya/NVEnc) 的启发，并使用了其中部分代码。相关版权及许可证见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
 ## 安装
 
