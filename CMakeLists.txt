@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25)
 # Set the deployment target before compiler detection; newer APIs require guards.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Target architecture")
-project(VTEnc VERSION 0.1.0 LANGUAGES CXX OBJCXX)
+project(VTEnc VERSION 0.1.1 LANGUAGES CXX OBJCXX)
 
 if(NOT APPLE OR NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     message(FATAL_ERROR "VTEnc requires macOS and the Apple SDK.")
