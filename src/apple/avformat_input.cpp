@@ -357,6 +357,8 @@ ContainerInput::ContainerInput(const EncodeConfig& config, const volatile std::s
         s.info.audio_edit_list = s.demux->priv_data && av_opt_find(s.demux->priv_data, "ignore_editlist", nullptr, 0, 0);
         s.info.audio_timescale = audio->time_base.den;
         s.info.audio_timebase_num = audio->time_base.num;
+        if (config.aac_audio && audio->duration > 0)
+            s.info.audio_duration = media_time(audio->duration, audio->time_base, "audio duration");
     }
     if (config.audio_only) {
         if (s.audio < 0) throw std::runtime_error("--audio-only requires an input audio track");

@@ -48,6 +48,7 @@ struct AudioTranscoder::Impl {
     bool audio_only = false;
     CMTime source_origin = kCMTimeInvalid;
     std::int64_t origin = 0, source_samples = 0, output_samples = 0, packet_index = 0;
+    std::int64_t decoded_samples = 0;
     std::optional<std::int64_t> source_limit;
     UInt32 priming = 0, packet_capacity = 0;
     std::vector<float> converted, callback_pcm;
@@ -96,16 +97,19 @@ struct AudioTranscoder::Impl {
                 if (!audio_only && CMTimeCompare(pts, CMTimeMake(origin, rate)) != 0)
                     std::cerr << "vtenc: AAC start rounded to nearest output sample (at most half a sample)\n";
             }
-            const auto expected = CMTimeAdd(source_origin, CMTimeMake(source_samples, source_rate));
+            // A movie edit may end before the last decoded frame. PTS still
+            // advances by the full decoded frame, including discarded samples.
+            const auto expected = CMTimeAdd(source_origin, CMTimeMake(decoded_samples, source_rate));
             const auto difference = CMTimeAbsoluteValue(CMTimeSubtract(pts, expected));
             if (!CMTIME_IS_NUMERIC(expected) || CMTIME_HAS_BEEN_ROUNDED(expected) ||
                 CMTimeCompare(difference, pts_tolerance) > 0)
                 throw std::runtime_error("Discontinuous decoded audio PTS: AAC requires a continuous sample timeline");
+            if (decoded_samples > INT64_MAX - count) throw std::runtime_error("Audio sample counter overflow");
+            decoded_samples += count;
             if (source_limit) {
                 count = static_cast<int>(std::min<std::int64_t>(count, *source_limit - source_samples));
                 if (!count) return; // Still drain decoder; these are explicitly declared trailing samples.
             }
-            if (source_samples > INT64_MAX - count) throw std::runtime_error("Audio sample counter overflow");
             source_samples += count;
         }
         const auto capacity = swr_get_out_samples(resampler, count);
@@ -259,8 +263,20 @@ AudioTranscoder::AudioTranscoder(ContainerInput& input, const EncodeConfig& conf
     out.extradata = static_cast<std::uint8_t*>(av_mallocz(2 + AV_INPUT_BUFFER_PADDING_SIZE));
     if (!out.extradata) throw std::bad_alloc();
     out.extradata_size = 2; AV_WB16(out.extradata, asc);
-    if (p->codec_id == AV_CODEC_ID_AAC && input.info().audio_edit_list)
-        s.source_limit = movie_aac_valid_samples(config.input, s.source_rate, s.channels);
+    if (p->codec_id == AV_CODEC_ID_AAC && input.info().audio_edit_list) {
+        const auto trim = movie_aac_trim(config.input, s.source_rate, s.channels);
+        s.source_limit = trim.valid_samples;
+        // With no leading skip, libavcodec outputs samples from media time zero.
+        // AudioFile can assume AAC priming even for a zero-origin movie edit.
+        // Apply the sample-exact presentation duration on the decoder's timeline.
+        const auto duration = CMTimeConvertScale(input.info().audio_duration, s.source_rate, kCMTimeRoundingMethod_Default);
+        if (trim.priming > 0 && p->initial_padding == 0 && s.frame->pts == 0 && CMTIME_IS_NUMERIC(duration) &&
+            !CMTIME_HAS_BEEN_ROUNDED(duration) && duration.value > 0 && duration.value != *s.source_limit) {
+            std::cerr << "vtenc: using zero-origin AAC track duration=" << duration.value
+                      << " samples; AudioFile packet table reports " << *s.source_limit << " valid samples\n";
+            s.source_limit = duration.value;
+        }
+    }
     s.convert(s.frame);
     std::cerr << "vtenc: audio backend=AudioToolbox AAC-LC, ABR=" << config.audio_bitrate << " bit/s, rate=" << s.rate
               << ", channels=" << s.channels << ", priming=" << s.priming << " samples\n";
@@ -269,6 +285,7 @@ AudioTranscoder::~AudioTranscoder() = default;
 MediaInfo AudioTranscoder::output_info() const {
     auto info = impl_->input.info();
     info.audio_parameters = impl_->parameters;
+    if (impl_->source_limit) info.audio_duration = CMTimeMake(*impl_->source_limit, impl_->source_rate);
     info.audio_timebase_num = 1;
     info.audio_timescale = info.audio_parameters->sample_rate;
     return info;

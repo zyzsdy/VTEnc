@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import struct
 import subprocess
 import tempfile
 import wave
@@ -65,6 +66,26 @@ def main():
             subprocess.run([*command, '-i', default, '-o', '-', '-f', 'adts'],
                            stdout=output, stderr=subprocess.PIPE, check=True, timeout=30)
         inspect(adts, 'aac', rate)
+
+        # A zero-origin MP4 edit without roll sample groups. AudioFile can
+        # assume leading priming here, although the presentation starts at 0.
+        edited = directory / 'zero-origin.mp4'
+        run(['ffmpeg', '-v', 'error', '-i', adts, '-c', 'copy',
+             '-movie_timescale', str(rate), edited])
+        data = bytearray(edited.read_bytes())
+        moov = data.rindex(b'moov')
+        for group in (b'sgpd', b'sbgp'):
+            offset = data.index(group, moov)
+            data[offset:offset + 4] = b'free'
+        edit = data.index(b'elst', moov)
+        version_flags, entries, length, start = struct.unpack_from('>4I', data, edit + 4)
+        require((version_flags, entries, start) == (0, 1, 0), 'Expected one zero-origin edit')
+        valid = length - 1248  # End inside the penultimate 1024-sample AAC packet.
+        struct.pack_into('>I', data, edit + 12, valid)
+        edited.write_bytes(data)
+        recoded = directory / 'zero-origin.m4a'
+        run([*command, '-i', edited, '-o', recoded])
+        require(inspect(recoded, 'mp4', rate)['duration_ts'] == valid, 'Lost samples from zero-origin AAC edit')
 
         transport = directory / 'input.ts'
         run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'sine=duration=2:sample_rate=44100',

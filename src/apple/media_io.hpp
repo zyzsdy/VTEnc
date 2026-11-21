@@ -27,6 +27,7 @@ struct MediaInfo {
     const AVCodecParameters* audio_parameters = nullptr; // Borrowed from ContainerInput.
     int audio_timebase_num = 0;
     bool audio_edit_list = false; // Demuxer exposes movie edit-list semantics.
+    CMTime audio_duration = kCMTimeInvalid; // Selected stream, in its input clock.
     CMTimeRange video_range = kCMTimeRangeInvalid;
     bool replayable = false; // avformat IO can be restarted; pipes/live inputs cannot.
     std::int32_t video_timescale = 0;

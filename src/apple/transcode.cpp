@@ -579,13 +579,15 @@ EncodeResult transcode_file(const EncodeConfig& config, const volatile std::sig_
         ContainerInput input(config, cancelled);
         AudioTranscoder encoder(input, config, cancelled);
         const auto info = encoder.output_info();
+        const auto duration = info.audio_duration;
+        const StatusTime total = CMTIME_IS_NUMERIC(duration) ? StatusTime{duration.value, duration.timescale} : StatusTime{};
         ContainerOutput output(config, info, nullptr, cancelled);
         std::int64_t packets = 0;
         while (auto packet = encoder.next()) {
             output.append_audio(packet.get());
             ++packets;
             if (config.status) config.status->advance(0, {packet->pts, info.audio_timescale},
-                {std::max<std::int64_t>(0, packet->pts + packet->duration), info.audio_timescale});
+                {std::max<std::int64_t>(0, packet->pts + packet->duration), info.audio_timescale}, total);
         }
         if (config.status) config.status->check_diagnostics();
         const auto bytes = output.finish(cancelled);

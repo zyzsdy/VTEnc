@@ -51,7 +51,7 @@ void duration(Bytes& header, std::uint64_t value, bool track = true) {
     }
 }
 }
-std::int64_t movie_aac_valid_samples(const std::string& path, int rate, int channels) {
+MovieAacTrim movie_aac_trim(const std::string& path, int rate, int channels) {
     if (path == "-") throw std::runtime_error("AAC movie input requires a local file for exact edit-list trim metadata; use --audio-copy/--no-audio for pipes");
     CFRef url(CFURLCreateFromFileSystemRepresentation(nullptr,
         reinterpret_cast<const UInt8*>(path.data()), static_cast<CFIndex>(path.size()), false));
@@ -70,7 +70,7 @@ std::int64_t movie_aac_valid_samples(const std::string& path, int rate, int chan
     AudioFilePacketTableInfo table{}; size = sizeof(table);
     check_status(AudioFileGetProperty(audio.value, kAudioFilePropertyPacketTableInfo, &size, &table), "Read AAC valid sample count");
     if (size != sizeof(table) || table.mNumberValidFrames <= 0) throw std::runtime_error("Invalid source AAC packet table");
-    return table.mNumberValidFrames;
+    return {table.mNumberValidFrames, table.mPrimingFrames};
 }
 void finalize_aac_edit(const std::string& path, int rate, std::int64_t first_packet_pts,
                        std::int64_t packets, std::uint32_t priming, std::uint32_t padding) try {
